@@ -11,6 +11,10 @@ MoreHands owns routes, run receipts, events, callback auth, and notifications. T
 long-running coding task. The runner reports facts back to MoreHands; it does not own Linear, Slack,
 merge, or production deploy authority.
 
+For the shortest Slack + GitHub self-host path, start with
+[self-hosted-quickstart.md](self-hosted-quickstart.md). This page covers the
+full deployment surface and optional integrations.
+
 ## Prerequisites
 
 - Node `>=22.18`. Flue `0.11` rejects older Node versions.
