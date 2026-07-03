@@ -130,7 +130,8 @@ Bindings: D1 `hatchery-skills` (`DB`), KV `SLACK_EVENTS`, DO `SANDBOX` (containe
 Dynamic Worker loader. Flue generates the agent DO bindings (`FLUE_PROJECT_AGENT`,
 `FLUE_REGISTRY`) itself.
 
-Deeper docs: [docs/deployment.md](docs/deployment.md) (setup, secrets, dashboard wiring),
+Deeper docs: [docs/self-hosted-quickstart.md](docs/self-hosted-quickstart.md) (minimal self-host path),
+[docs/deployment.md](docs/deployment.md) (setup, secrets, dashboard wiring),
 [docs/runner-contract.md](docs/runner-contract.md) (MoreHands ⇄ runner protocol),
 [docs/decisions/](docs/decisions/) (ADRs), [docs/planning/](docs/planning/) (design notes,
 including the [Flue 0.11 upgrade](docs/planning/flue-011-upgrade.md)).
