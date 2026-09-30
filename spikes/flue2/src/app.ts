@@ -21,6 +21,8 @@ observe((event, ctx) => {
       if ((event as any).type === 'submission_settled' && (event as any).submissionId) {
         await db.prepare('CREATE TABLE IF NOT EXISTS settled(submission_id TEXT PRIMARY KEY)').run();
         await db.prepare('INSERT OR IGNORE INTO settled(submission_id) VALUES (?)').bind((event as any).submissionId).run();
+        await db.prepare('CREATE TABLE IF NOT EXISTS lastsettle(conv TEXT PRIMARY KEY, ts INTEGER)').run();
+        await db.prepare('INSERT OR REPLACE INTO lastsettle(conv, ts) VALUES (?,?)').bind((event as any).instanceId, Date.now()).run();
       }
       const isDelta = event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta';
       if (isDelta) {
@@ -167,13 +169,32 @@ async function gwSchema(db: D1Database) {
   await db.prepare('CREATE TABLE IF NOT EXISTS inflight(conv TEXT, submission_id TEXT)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS settled(submission_id TEXT PRIMARY KEY)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS gwrows(seq INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT, kind TEXT, key TEXT, text TEXT, extra TEXT, ts INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS lastsettle(conv TEXT PRIMARY KEY, ts INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS gwcap(conv TEXT PRIMARY KEY, n INTEGER)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS gwmsgs(event_id TEXT PRIMARY KEY, burst TEXT, conv TEXT, sender TEXT, token TEXT, text TEXT, path TEXT, submission_id TEXT, ts INTEGER)').run();
 }
 app.post('/gw-reset', async (c) => {
   await gwSchema(c.env.DB);
-  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
+  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'gwcap', 'lastsettle', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
   return c.json({ ok: true });
 });
+let gwPolicy: { policy: 'A' | 'B' | 'C'; windowMs: number; cooldownMs?: number } = { policy: 'A', windowMs: 2000 };
+const gwBatches = new Map<string, { msgs: any[]; deadline: number }>();
+app.post('/gw-config', async (c) => {
+  gwPolicy = await c.req.json();
+  return c.json(gwPolicy);
+});
+async function gwFlush(db: D1Database, conv: string, msgs: any[]) {
+  // Policy B flush: ONE ack, ONE dispatch for the whole batch. In-memory timer = spike only; production needs a durable timer.
+  const ackTs = `ack-${crypto.randomUUID().slice(0, 6)}`;
+  await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(conv, 'ack', ackTs, 'Working...', '', Date.now()).run();
+  const ids = msgs.map((m) => m.event_id);
+  const body = msgs.map((m) => `[${m.sender}] ${m.text}`).join('\n');
+  const attrs: Record<string, string> = { sender: msgs[msgs.length - 1].sender, senders: [...new Set(msgs.map((m) => m.sender))].join(','), eventIds: ids.join(','), count: String(msgs.length), ackTs };
+  const receipt = await dispatch(Gw, { id: conv, idempotencyKey: `batch:${ids.join('+')}`.slice(0, 256), message: { kind: 'signal', type: 'slack.message', body, attributes: attrs } });
+  if (!receipt.deduplicated) await db.prepare('INSERT INTO inflight(conv, submission_id) VALUES (?,?)').bind(conv, receipt.submissionId).run();
+  for (const id of ids) await db.prepare('UPDATE gwmsgs SET submission_id=? WHERE event_id=?').bind(receipt.submissionId, id).run();
+}
 app.post('/gw', async (c) => {
   const db = c.env.DB;
   const b = await c.req.json<{ event_id: string; conv: string; sender: string; text: string; token: string; burst: string; model?: string }>();
@@ -184,6 +205,37 @@ app.post('/gw', async (c) => {
   // 2. in flight? = accepted-but-unsettled submissions for this conversation (fed by observe() settled events).
   const n = await db.prepare('SELECT COUNT(*) AS n FROM inflight WHERE conv=? AND submission_id NOT IN (SELECT submission_id FROM settled)').bind(b.conv).first<{ n: number }>();
   const busy = (n?.n ?? 0) > 0;
+  // Policy C: debounce only inside the cooldown after a settle; otherwise behave like A.
+  let cWindow = false;
+  if (gwPolicy.policy === 'C' && !busy) {
+    if (gwBatches.has(b.conv)) cWindow = true;
+    else {
+      const ls = await db.prepare('SELECT ts FROM lastsettle WHERE conv=?').bind(b.conv).first<{ ts: number }>();
+      if (ls && Date.now() - ls.ts < (gwPolicy.cooldownMs ?? 3000)) {
+        cWindow = true;
+        await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(b.conv, 'c_window', b.event_id, '', '', Date.now()).run();
+      }
+    }
+  }
+  if ((gwPolicy.policy === 'B' || cWindow) && !busy) {
+    let batch = gwBatches.get(b.conv);
+    if (!batch) {
+      batch = { msgs: [], deadline: Date.now() + gwPolicy.windowMs };
+      gwBatches.set(b.conv, batch);
+      const bt = batch;
+      c.executionCtx.waitUntil(
+        (async () => {
+          while (Date.now() < bt.deadline) await new Promise((r) => setTimeout(r, 40));
+          gwBatches.delete(b.conv);
+          await gwFlush(db, b.conv, bt.msgs);
+        })(),
+      );
+    }
+    batch.msgs.push(b);
+    batch.deadline = Date.now() + gwPolicy.windowMs;
+    await db.prepare('INSERT INTO gwmsgs(event_id, burst, conv, sender, token, text, path, submission_id, ts) VALUES (?,?,?,?,?,?,?,?,?)').bind(b.event_id, b.burst, b.conv, b.sender, b.token, b.text, 'debounced', '', Date.now()).run();
+    return c.json({ path: 'debounced' });
+  }
   const attrs: Record<string, string> = { sender: b.sender, eventId: b.event_id, ...(b.model ? { model: b.model } : {}) };
   let path: string;
   if (busy) {
@@ -203,7 +255,12 @@ app.post('/gw', async (c) => {
 app.get('/gw-state', async (c) => {
   await gwSchema(c.env.DB);
   const n = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM inflight WHERE submission_id NOT IN (SELECT submission_id FROM settled)').first<{ n: number }>();
-  return c.json({ inflight: n?.n ?? 0 });
+  return c.json({ inflight: n?.n ?? 0, batches: gwBatches.size });
+});
+app.get('/gw-fail', async (c) => {
+  const conv = c.req.query('conv') ?? '';
+  const r = (await c.env.DB.prepare("SELECT body FROM events WHERE type='submission_settled' AND instance_id=?").bind(conv).all<{ body: string }>()).results ?? [];
+  return c.json(r.map((x) => JSON.parse(x.body)));
 });
 app.get('/gw-dump', async (c) => {
   await gwSchema(c.env.DB);
@@ -211,7 +268,7 @@ app.get('/gw-dump', async (c) => {
   return c.json({
     msgs: await q('SELECT * FROM gwmsgs ORDER BY ts'),
     rows: await q('SELECT * FROM gwrows ORDER BY seq'),
-    events: await q("SELECT ts, type, instance_id, submission_id, body FROM events WHERE type IN ('submission_queued','submission_running','submission_settled','tool_start') ORDER BY seq"),
+    events: await q("SELECT ts, type, instance_id, submission_id, body FROM events WHERE type IN ('submission_queued','submission_running','submission_settled','tool_start','turn_request') ORDER BY seq"),
   });
 });
 
