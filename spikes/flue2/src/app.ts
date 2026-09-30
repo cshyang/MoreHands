@@ -3,6 +3,10 @@ import { dispatch, observe } from '@flue/runtime';
 import { createAgentRouter } from '@flue/runtime/routing';
 import { Project } from './agents/project';
 import { Retry, RetryOnce } from './agents/retry';
+import { Pa, Pf, Pr, Hng, Stall, Sbx, SbxC } from './agents/probe';
+import { createProvider } from '@earendil-works/pi-ai';
+import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
+import { setProvider } from '@flue/runtime';
 
 // ---- Q2: observe() at module scope. Runs in every isolate (Worker + each agent DO). -------------
 // Persist what the observer sees to D1 so the Worker can read it back (DO isolate state is private).
@@ -116,6 +120,46 @@ app.post('/go2', async (c) => {
     return c.json({ error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) }, 500);
   }
 });
+// ---- native-first audit probes ------------------------------------------------------------
+setProvider(
+  createProvider({
+    id: 'stall',
+    auth: { apiKey: { name: 'keyless', resolve: async () => ({ auth: { apiKey: 'stall-key' } }) } },
+    models: [
+      { id: 'm1', name: 'stall', api: 'openai-completions', provider: 'stall', baseUrl: 'http://localhost:5288/v1', reasoning: false, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 },
+    ],
+    api: openAICompletionsApi(),
+  } as any),
+);
+const PROBES: Record<string, any> = { pr: Pr, pa: Pa, pf: Pf, hng: Hng, stall: Stall, sbx: Sbx, sbxc: SbxC };
+app.post('/probe', async (c) => {
+  const { agent, ...req } = await c.req.json<any>();
+  await c.env.DB.prepare('CREATE TABLE IF NOT EXISTS plog(seq INTEGER PRIMARY KEY AUTOINCREMENT, instance_id TEXT, ts INTEGER, what TEXT, extra TEXT)').run();
+  try {
+    return c.json({ receipt: await dispatch(PROBES[agent], req) });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) }, 500);
+  }
+});
+app.get('/plog', async (c) => {
+  await c.env.DB.prepare('CREATE TABLE IF NOT EXISTS plog(seq INTEGER PRIMARY KEY AUTOINCREMENT, instance_id TEXT, ts INTEGER, what TEXT, extra TEXT)').run();
+  const inst = c.req.query('instance');
+  const q = inst ? c.env.DB.prepare('SELECT * FROM plog WHERE instance_id=? ORDER BY seq').bind(inst) : c.env.DB.prepare('SELECT * FROM plog ORDER BY seq');
+  return c.json((await q.all()).results);
+});
+app.post('/plog-reset', async (c) => {
+  await c.env.DB.prepare('CREATE TABLE IF NOT EXISTS plog(seq INTEGER PRIMARY KEY AUTOINCREMENT, instance_id TEXT, ts INTEGER, what TEXT, extra TEXT)').run();
+  await c.env.DB.prepare('DELETE FROM plog').run();
+  await c.env.DB.prepare('DELETE FROM events').run();
+  return c.json({ ok: true });
+});
+app.route('/agents/pa', createAgentRouter(Pa));
+app.route('/agents/pr', createAgentRouter(Pr));
+app.route('/agents/pf', createAgentRouter(Pf));
+app.route('/agents/hng', createAgentRouter(Hng));
+app.route('/agents/stall', createAgentRouter(Stall));
+app.route('/agents/sbx', createAgentRouter(Sbx));
+app.route('/agents/sbxc', createAgentRouter(SbxC));
 app.route('/agents/project', createAgentRouter(Project));
 app.route('/agents/retry', createAgentRouter(Retry));
 app.route('/agents/retry-once', createAgentRouter(RetryOnce));
