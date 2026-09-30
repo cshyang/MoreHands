@@ -3,6 +3,7 @@ import { dispatch, observe } from '@flue/runtime';
 import { createAgentRouter } from '@flue/runtime/routing';
 import { Project } from './agents/project';
 import { Retry, RetryOnce } from './agents/retry';
+import { Gw } from './agents/gw';
 import { Pa, Pf, Pg, Pr, Pq, Ph, Hng, Stall, Sbx, SbxC } from './agents/probe';
 import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
@@ -17,6 +18,10 @@ observe((event, ctx) => {
       const db = (ctx.env as any).DB as D1Database | undefined;
       if (!db) return;
       const now = Date.now();
+      if ((event as any).type === 'submission_settled' && (event as any).submissionId) {
+        await db.prepare('CREATE TABLE IF NOT EXISTS settled(submission_id TEXT PRIMARY KEY)').run();
+        await db.prepare('INSERT OR IGNORE INTO settled(submission_id) VALUES (?)').bind((event as any).submissionId).run();
+      }
       const isDelta = event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta';
       if (isDelta) {
         const key = `${event.instanceId}:${event.type}`;
@@ -155,6 +160,61 @@ app.post('/plog-reset', async (c) => {
   await c.env.DB.prepare('DELETE FROM events').run();
   return c.json({ ok: true });
 });
+
+// ---- owner-approved burst design: gateway simulation ---------------------------------------------
+async function gwSchema(db: D1Database) {
+  await db.prepare('CREATE TABLE IF NOT EXISTS claims(event_id TEXT PRIMARY KEY)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS inflight(conv TEXT, submission_id TEXT)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS settled(submission_id TEXT PRIMARY KEY)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS gwrows(seq INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT, kind TEXT, key TEXT, text TEXT, extra TEXT, ts INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS gwmsgs(event_id TEXT PRIMARY KEY, burst TEXT, conv TEXT, sender TEXT, token TEXT, text TEXT, path TEXT, submission_id TEXT, ts INTEGER)').run();
+}
+app.post('/gw-reset', async (c) => {
+  await gwSchema(c.env.DB);
+  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
+  return c.json({ ok: true });
+});
+app.post('/gw', async (c) => {
+  const db = c.env.DB;
+  const b = await c.req.json<{ event_id: string; conv: string; sender: string; text: string; token: string; burst: string; model?: string }>();
+  await gwSchema(db);
+  // 1. claim the event id (real system: KV claim). Duplicate redelivery stops here.
+  const claim = (await db.prepare('INSERT OR IGNORE INTO claims(event_id) VALUES (?)').bind(b.event_id).run()) as any;
+  if (!(claim?.meta?.changes ?? 0)) return c.json({ dup: true });
+  // 2. in flight? = accepted-but-unsettled submissions for this conversation (fed by observe() settled events).
+  const n = await db.prepare('SELECT COUNT(*) AS n FROM inflight WHERE conv=? AND submission_id NOT IN (SELECT submission_id FROM settled)').bind(b.conv).first<{ n: number }>();
+  const busy = (n?.n ?? 0) > 0;
+  const attrs: Record<string, string> = { sender: b.sender, eventId: b.event_id, ...(b.model ? { model: b.model } : {}) };
+  let path: string;
+  if (busy) {
+    path = 'eyes';
+    await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(b.conv, 'eyes', b.event_id, '', '', Date.now()).run();
+  } else {
+    path = 'ack';
+    const ackTs = `ack-${crypto.randomUUID().slice(0, 6)}`;
+    attrs.ackTs = ackTs;
+    await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(b.conv, 'ack', ackTs, 'Working...', '', Date.now()).run();
+  }
+  const receipt = await dispatch(Gw, { id: b.conv, idempotencyKey: b.event_id, message: { kind: 'signal', type: 'slack.message', body: b.text, attributes: attrs } });
+  if (!receipt.deduplicated) await db.prepare('INSERT INTO inflight(conv, submission_id) VALUES (?,?)').bind(b.conv, receipt.submissionId).run();
+  await db.prepare('INSERT INTO gwmsgs(event_id, burst, conv, sender, token, text, path, submission_id, ts) VALUES (?,?,?,?,?,?,?,?,?)').bind(b.event_id, b.burst, b.conv, b.sender, b.token, b.text, path, receipt.submissionId, Date.now()).run();
+  return c.json({ path, submissionId: receipt.submissionId });
+});
+app.get('/gw-state', async (c) => {
+  await gwSchema(c.env.DB);
+  const n = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM inflight WHERE submission_id NOT IN (SELECT submission_id FROM settled)').first<{ n: number }>();
+  return c.json({ inflight: n?.n ?? 0 });
+});
+app.get('/gw-dump', async (c) => {
+  await gwSchema(c.env.DB);
+  const q = async (sql: string) => (await c.env.DB.prepare(sql).all()).results;
+  return c.json({
+    msgs: await q('SELECT * FROM gwmsgs ORDER BY ts'),
+    rows: await q('SELECT * FROM gwrows ORDER BY seq'),
+    events: await q("SELECT ts, type, instance_id, submission_id, body FROM events WHERE type IN ('submission_queued','submission_running','submission_settled','tool_start') ORDER BY seq"),
+  });
+});
+
 app.route('/agents/pa', createAgentRouter(Pa));
 app.route('/agents/pq', createAgentRouter(Pq));
 app.route('/agents/pg', createAgentRouter(Pg));
