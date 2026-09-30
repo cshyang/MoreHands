@@ -1,0 +1,21 @@
+{
+  // SPIKE ONLY. Placeholder ids. Never deploy.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "flue2-spike",
+  "compatibility_date": "2026-06-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "kv_namespaces": [{ "binding": "SLACK_EVENTS", "id": "00000000000000000000000000000000" }],
+  "triggers": { "crons": ["*/2 * * * *"] },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "flue2-spike", "database_id": "00000000-0000-0000-0000-000000000000" }
+  ],
+  // Copy of the real MoreHands migration history, plus the 2.x cutover tag.
+  "migrations": [
+    { "tag": "flue-class-FlueRegistry", "new_sqlite_classes": ["FlueRegistry"] },
+    { "tag": "flue-class-Project", "new_sqlite_classes": ["Project"] },
+    { "tag": "sandbox-class", "new_sqlite_classes": ["Sandbox"] },
+    { "tag": "flue-011", "deleted_classes": ["Project"], "new_sqlite_classes": ["FlueProjectAgent"] },
+    { "tag": "flue-2", "deleted_classes": ["FlueRegistry"] }
+  ]
+}
