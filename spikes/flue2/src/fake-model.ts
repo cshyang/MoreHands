@@ -39,6 +39,8 @@ function make(id: string, opts: { tokensPerSecond?: number }) {
     if (last?.role === 'toolResult') return fauxAssistantMessage(fauxText('after-tools'));
     const u = lastUserText(messages);
     console.log(`[faux ${id}] last=${last?.role} user=${JSON.stringify(u).slice(0, 120)} roles=${messages.map((m) => m.role).join(',')}`);
+    if (u.includes('ERR429')) return fauxAssistantMessage([], { stopReason: 'error', errorMessage: '429 Too Many Requests: rate limit exceeded' });
+    if (u.includes('ERR400')) return fauxAssistantMessage([], { stopReason: 'error', errorMessage: '400 invalid request: bad payload' });
     const long = u.match(/LONG:(\d+)/);
     if (long) {
       const n = Number(long[1]);

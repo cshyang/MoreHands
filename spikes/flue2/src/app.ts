@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { dispatch, observe } from '@flue/runtime';
 import { createAgentRouter } from '@flue/runtime/routing';
 import { Project } from './agents/project';
+import { Retry, RetryOnce } from './agents/retry';
 
 // ---- Q2: observe() at module scope. Runs in every isolate (Worker + each agent DO). -------------
 // Persist what the observer sees to D1 so the Worker can read it back (DO isolate state is private).
@@ -32,6 +33,10 @@ observe((event, ctx) => {
       }
       if (e.type === 'message_start' || e.type === 'message_end') extra.role = e.message?.role;
       if (e.type === 'tool' || e.type === 'tool_start') Object.assign(extra, { toolName: e.toolName, isError: e.isError, result: JSON.stringify(e.result ?? null).slice(0, 300) });
+      if (e.type === 'operation' || e.type === 'turn') Object.assign(extra, { isError: e.isError, error: e.error ?? e.response?.error?.message, finishReason: e.response?.finishReason });
+      if (e.type === 'agent_end') extra.lastStop = (e.messages ?? []).slice(-1).map((m: any) => ({ role: m.role, stopReason: m.stopReason, err: m.errorMessage }));
+      if (e.type === 'submission_running') Object.assign(extra, { attemptCount: e.attemptCount, maxAttempts: e.maxAttempts });
+      if (e.type === 'submission_recovery') Object.assign(extra, { operation: e.operation, outcome: e.outcome, attemptCount: e.attemptCount, error: e.error?.message });
       if (e.type === 'submission_settled') Object.assign(extra, { outcome: e.outcome, error: e.error });
       if (e.type === 'log') Object.assign(extra, { message: e.message, attributes: e.attributes });
       await insert(db, now, event, extra);
@@ -53,6 +58,8 @@ const app = new Hono<{ Bindings: { DB: D1Database } }>();
 async function ensureSchema(db: D1Database) {
   await db.prepare('CREATE TABLE IF NOT EXISTS bindings(project_id TEXT PRIMARY KEY, persona TEXT, model TEXT)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS memories(id INTEGER PRIMARY KEY AUTOINCREMENT, project_id TEXT, fact TEXT)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS tool_calls(instance_id TEXT, submission_id TEXT, attempt_ts INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS replies(instance_id TEXT, submission_id TEXT, text TEXT, ts INTEGER)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, type TEXT, instance_id TEXT, submission_id TEXT, event_index INTEGER, body TEXT)').run();
 }
 
@@ -88,6 +95,29 @@ app.post('/go', async (c) => {
   }
 });
 
+app.get('/rows', async (c) => {
+  await ensureSchema(c.env.DB);
+  const tc = (await c.env.DB.prepare('SELECT * FROM tool_calls ORDER BY rowid').all()).results;
+  const rp = (await c.env.DB.prepare('SELECT * FROM replies ORDER BY rowid').all()).results;
+  return c.json({ tool_calls: tc, replies: rp });
+});
+app.post('/reset-rows', async (c) => {
+  await ensureSchema(c.env.DB);
+  await c.env.DB.prepare('DELETE FROM tool_calls').run();
+  await c.env.DB.prepare('DELETE FROM replies').run();
+  await c.env.DB.prepare('DELETE FROM events').run();
+  return c.json({ ok: true });
+});
+app.post('/go2', async (c) => {
+  const { agent, ...req } = await c.req.json<any>();
+  try {
+    return c.json({ receipt: await dispatch(agent === 'once' ? RetryOnce : Retry, req) });
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) }, 500);
+  }
+});
 app.route('/agents/project', createAgentRouter(Project));
+app.route('/agents/retry', createAgentRouter(Retry));
+app.route('/agents/retry-once', createAgentRouter(RetryOnce));
 
 export default app;

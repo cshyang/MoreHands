@@ -16,6 +16,8 @@
     { "tag": "flue-class-Project", "new_sqlite_classes": ["Project"] },
     { "tag": "sandbox-class", "new_sqlite_classes": ["Sandbox"] },
     { "tag": "flue-011", "deleted_classes": ["Project"], "new_sqlite_classes": ["FlueProjectAgent"] },
-    { "tag": "flue-2", "deleted_classes": ["FlueRegistry"] }
+    { "tag": "flue-2a-reset", "deleted_classes": ["FlueProjectAgent", "FlueRegistry"] },
+    { "tag": "flue-2b-recreate", "new_sqlite_classes": ["FlueProjectAgent"] },
+    { "tag": "retry-spike", "new_sqlite_classes": ["FlueRetryAgent", "FlueRetryOnceAgent"] }
   ]
 }
