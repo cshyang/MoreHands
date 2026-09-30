@@ -228,3 +228,69 @@ export function Pr({ id }: AgentProps) {
   });
   return 'Answer the question in one plain-text sentence. Do not call tools on your own.';
 }
+
+// ---------------------------------------------------------------- quick burst (no slow step), plain vs marker shim
+// 'plain'  : post_reply posts immediately.
+// 'marker' : the gateway wrote the newest message seq to D1 before dispatch; post_reply refuses while a
+//            newer message than the delivery it is answering exists, so the newer one can join first.
+function quickBurst(id: string, mode: 'plain' | 'marker') {
+  const d = useDelivery();
+  const seq = d.kind === 'signal' ? Number(d.attributes?.seq ?? 0) : 0;
+  useTool(
+    defineTool({
+      name: 'post_reply',
+      description: 'Post the answer to the user. Call once per answer.',
+      input: v.object({ text: v.string() }),
+      run: async ({ data }) => {
+        if (mode === 'marker') {
+          const row = await db().prepare('SELECT MAX(seq) AS m FROM marks WHERE instance_id=?').bind(id).first<{ m: number }>();
+          if ((row?.m ?? 0) > seq) {
+            await plog(id, 'reply_refused', `mark=${row?.m} delivery=${seq}`);
+            return 'NOT SENT: a newer message arrived in this conversation. Do not reply yet; you will receive it next. Then answer everything in one reply.';
+          }
+        }
+        await plog(id, 'reply_posted', data.text);
+        return 'posted';
+      },
+    }),
+  );
+}
+const QUICK_PROMPT = 'You are a chat agent. Answer each user message by calling post_reply exactly once per answer, with a short answer (under 15 words) that covers every question you have seen so far. Do not call any other tool.';
+export function Pq({ id }: AgentProps) {
+  const d = useDelivery();
+  useModel(modelOf(d, 'zai/glm-5.3-flash'));
+  quickBurst(id, 'plain');
+  return QUICK_PROMPT;
+}
+export function Ph({ id }: AgentProps) {
+  const d = useDelivery();
+  useModel(modelOf(d, 'zai/glm-5.3-flash'));
+  quickBurst(id, 'marker');
+  return QUICK_PROMPT;
+}
+
+// 'accum': reply tool appends to a stash; useAgentFinish posts once when nothing is queued.
+export function Pg({ id }: AgentProps) {
+  const d = useDelivery();
+  useModel(modelOf(d, 'zai/glm-5.3-flash'));
+  const [stash, setStash] = usePersistentState<string[]>('stash_list', []);
+  useTool(
+    defineTool({
+      name: 'post_reply',
+      description: 'Queue the answer to the user. Call once per answer; everything queued is delivered together when you finish.',
+      input: v.object({ text: v.string() }),
+      run: async ({ data }) => {
+        setStash((prev) => [...(prev ?? []), data.text]);
+        await plog(id, 'reply_stashed', data.text);
+        return 'queued; delivered when you finish';
+      },
+    }),
+  );
+  useAgentFinish(async () => {
+    if (stash.length) {
+      await plog(id, 'reply_posted_at_finish', stash.join(' | '));
+      setStash([]);
+    }
+  });
+  return QUICK_PROMPT;
+}

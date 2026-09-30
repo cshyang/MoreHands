@@ -3,7 +3,7 @@ import { dispatch, observe } from '@flue/runtime';
 import { createAgentRouter } from '@flue/runtime/routing';
 import { Project } from './agents/project';
 import { Retry, RetryOnce } from './agents/retry';
-import { Pa, Pf, Pr, Hng, Stall, Sbx, SbxC } from './agents/probe';
+import { Pa, Pf, Pg, Pr, Pq, Ph, Hng, Stall, Sbx, SbxC } from './agents/probe';
 import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { setProvider } from '@flue/runtime';
@@ -131,11 +131,13 @@ setProvider(
     api: openAICompletionsApi(),
   } as any),
 );
-const PROBES: Record<string, any> = { pr: Pr, pa: Pa, pf: Pf, hng: Hng, stall: Stall, sbx: Sbx, sbxc: SbxC };
+const PROBES: Record<string, any> = { pg: Pg, pq: Pq, ph: Ph, pr: Pr, pa: Pa, pf: Pf, hng: Hng, stall: Stall, sbx: Sbx, sbxc: SbxC };
 app.post('/probe', async (c) => {
   const { agent, ...req } = await c.req.json<any>();
   await c.env.DB.prepare('CREATE TABLE IF NOT EXISTS plog(seq INTEGER PRIMARY KEY AUTOINCREMENT, instance_id TEXT, ts INTEGER, what TEXT, extra TEXT)').run();
   try {
+    const seq = (req as any).message?.attributes?.seq;
+    if (seq) { await c.env.DB.prepare('CREATE TABLE IF NOT EXISTS marks(instance_id TEXT, seq INTEGER)').run(); await c.env.DB.prepare('INSERT INTO marks(instance_id, seq) VALUES (?,?)').bind((req as any).id, Number(seq)).run(); }
     return c.json({ receipt: await dispatch(PROBES[agent], req) });
   } catch (e) {
     return c.json({ error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) }, 500);
@@ -154,6 +156,9 @@ app.post('/plog-reset', async (c) => {
   return c.json({ ok: true });
 });
 app.route('/agents/pa', createAgentRouter(Pa));
+app.route('/agents/pq', createAgentRouter(Pq));
+app.route('/agents/pg', createAgentRouter(Pg));
+app.route('/agents/ph', createAgentRouter(Ph));
 app.route('/agents/pr', createAgentRouter(Pr));
 app.route('/agents/pf', createAgentRouter(Pf));
 app.route('/agents/hng', createAgentRouter(Hng));

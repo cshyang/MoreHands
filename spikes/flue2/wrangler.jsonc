@@ -19,6 +19,6 @@
     { "tag": "flue-2a-reset", "deleted_classes": ["FlueProjectAgent", "FlueRegistry"] },
     { "tag": "flue-2b-recreate", "new_sqlite_classes": ["FlueProjectAgent"] },
     { "tag": "retry-spike", "new_sqlite_classes": ["FlueRetryAgent", "FlueRetryOnceAgent"] },
-    { "tag": "probe-spike", "new_sqlite_classes": ["FluePaAgent", "FluePfAgent", "FlueHngAgent", "FlueStallAgent", "FlueSbxAgent", "FlueSbxCAgent", "FluePrAgent"] }
+    { "tag": "probe-spike", "new_sqlite_classes": ["FluePaAgent", "FluePfAgent", "FlueHngAgent", "FlueStallAgent", "FlueSbxAgent", "FlueSbxCAgent", "FluePrAgent", "FluePqAgent", "FluePhAgent", "FluePgAgent"] }
   ]
 }
