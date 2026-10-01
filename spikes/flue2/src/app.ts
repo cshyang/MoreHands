@@ -278,17 +278,18 @@ app.get('/gw-dump', async (c) => {
 async function gw2Schema(db: D1Database) {
   await gwSchema(db);
   await db.prepare('CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT, sender TEXT, text TEXT, event_id TEXT, status TEXT, created_at INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS lastparts(id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT, text TEXT, posted INTEGER)').run();
   await db.prepare('CREATE TABLE IF NOT EXISTS lasttext(conv TEXT PRIMARY KEY, text TEXT, posted INTEGER, ts INTEGER)').run();
 }
-let gw2Arm: 'base' | 'j' | 'f' = 'j';
-const GW2_AGENTS: Record<string, any> = { base: Gb, j: Gj, f: Gf };
+let gw2Arm: 'base' | 'j' | 'f' | 'f2' = 'j';
+const GW2_AGENTS: Record<string, any> = { base: Gb, j: Gj, f: Gf, f2: Gf };
 app.post('/gw2-config', async (c) => {
-  gw2Arm = (await c.req.json<{ arm: 'base' | 'j' | 'f' }>()).arm;
+  gw2Arm = (await c.req.json<{ arm: 'base' | 'j' | 'f' | 'f2' }>()).arm;
   return c.json({ arm: gw2Arm });
 });
 app.post('/gw2-reset', async (c) => {
   await gw2Schema(c.env.DB);
-  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'gwcap', 'lastsettle', 'pending', 'lasttext', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
+  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'gwcap', 'lastsettle', 'pending', 'lasttext', 'lastparts', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
   return c.json({ ok: true });
 });
 async function gw2Dispatch(db: D1Database, conv: string, attrs: Record<string, string>, body: string, key: string) {
@@ -362,7 +363,7 @@ let fChain: Promise<void> = Promise.resolve();
 observe((event, ctx) => {
   const e = event as any;
   const conv = e.instanceId as string | undefined;
-  if (!conv || !conv.includes('/conv:F-') || (e.type !== 'message_end' && e.type !== 'submission_settled')) return;
+  if (!conv || !(conv.includes('/conv:F-') || conv.includes('/conv:F2-')) || (e.type !== 'message_end' && e.type !== 'submission_settled')) return;
   fChain = fChain.then(async () => {
     try {
       const db = (ctx.env as any).DB as D1Database;
@@ -371,16 +372,24 @@ observe((event, ctx) => {
         if (e.message?.role !== 'assistant' || blocks.some((b) => b.type === 'toolCall')) return; // intermediate (tool-call) messages are never captured
         const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
         await db.prepare('INSERT OR REPLACE INTO lasttext(conv, text, posted, ts) VALUES (?,?,0,?)').bind(conv, text, Date.now()).run();
+        // F2 fix attempt: keep the text of every cycle-final (no-tool) assistant message, not just the last one.
+        if (conv.includes('/conv:F2-') && text) await db.prepare('INSERT INTO lastparts(conv, text, posted) VALUES (?,?,0)').bind(conv, text).run();
         return;
       }
       if (e.outcome !== 'completed') return;
       const last = await db.prepare('SELECT text FROM lasttext WHERE conv=? AND posted=0').bind(conv).first<{ text: string }>();
       if (!last) return;
       await db.prepare('UPDATE lasttext SET posted=1 WHERE conv=?').bind(conv).run();
-      if (!last.text) { await gw2Row(db, conv, 'empty_final', '', ''); return; }
+      let postText = last.text;
+      if (conv.includes('/conv:F2-')) {
+        const parts = (await db.prepare('SELECT text FROM lastparts WHERE conv=? AND posted=0 ORDER BY id').bind(conv).all<{ text: string }>()).results ?? [];
+        await db.prepare('UPDATE lastparts SET posted=1 WHERE conv=?').bind(conv).run();
+        postText = parts.map((x) => x.text).join('\n\n');
+      }
+      if (!postText) { await gw2Row(db, conv, 'empty_final', '', ''); return; }
       const ack = await db.prepare("SELECT key FROM gwrows WHERE conv=? AND kind='ack' AND extra!='edited' ORDER BY seq LIMIT 1").bind(conv).first<{ key: string }>();
-      if (ack) await db.prepare("UPDATE gwrows SET text=?, extra='edited' WHERE conv=? AND kind='ack' AND key=?").bind(last.text, conv, ack.key).run();
-      await gw2Row(db, conv, 'post', '', last.text);
+      if (ack) await db.prepare("UPDATE gwrows SET text=?, extra='edited' WHERE conv=? AND kind='ack' AND key=?").bind(postText, conv, ack.key).run();
+      await gw2Row(db, conv, 'post', '', postText);
     } catch (err) {
       console.log('[gw2 observer]', err instanceof Error ? err.message : String(err));
     }
