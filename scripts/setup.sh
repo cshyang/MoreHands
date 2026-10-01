@@ -98,9 +98,9 @@ migrate() {
 deploy() {
   require_login
   echo "→ build + deploy $WORKER"
-  npx flue build --target cloudflare
+  npm run build
   # Patch THIS account's resource ids into the built config (the tracked wrangler.jsonc keeps
-  # the canonical ids; Flue copied them into dist during the build).
+  # the canonical ids; the Cloudflare Vite plugin copied them into dist during the build).
   if [ -n "${D1_DATABASE_ID:-}" ] || [ -n "${KV_NAMESPACE_ID:-}" ]; then
     DIST="dist/$WORKER/wrangler.json" DB_NAME="$DB_NAME" KV_BINDING="$KV_BINDING" node -e '
       const fs = require("fs"); const p = process.env.DIST;
@@ -155,7 +155,7 @@ secrets() {
   fi
   # Bulk file holds only the keys that are actually set (blanks skipped → feature stays inert).
   HEARTBEAT_TOKEN="$HEARTBEAT_TOKEN" BULK_FILE="$BULK_FILE" node -e '
-    const keys=["OPENROUTER_API_KEY","HEARTBEAT_TOKEN","SLACK_SIGNING_SECRET","SLACK_BOT_TOKEN_DEFAULT","KNOWN_TEAM_IDS","SLACK_BOT_ID","SLACK_DEFAULT_TOKEN_REF","ADMIN_CONNECTIONS_TOKEN","NANGO_SECRET_KEY","NANGO_WEBHOOK_SECRET","LINEAR_WEBHOOK_SECRET","TRIGGER_SECRET_KEY","TRIGGER_API_URL","AGENT_RUNNER_TOKEN","MOREHANDS_PUBLIC_URL","RUNNER_GITHUB_PAT_TEMP","LINEAR_AGENT_PROJECTS","WORKBENCH_RUNNER_TOKEN","CODING_RUNNER_URL","TAVILY_API_KEY"];
+    const keys=["ZAI_API_KEY","ZAI_CODING_API_KEY","OPENROUTER_API_KEY","HEARTBEAT_TOKEN","SLACK_SIGNING_SECRET","SLACK_BOT_TOKEN_DEFAULT","KNOWN_TEAM_IDS","SLACK_BOT_ID","SLACK_DEFAULT_TOKEN_REF","ADMIN_CONNECTIONS_TOKEN","NANGO_SECRET_KEY","NANGO_WEBHOOK_SECRET","LINEAR_WEBHOOK_SECRET","TRIGGER_SECRET_KEY","TRIGGER_API_URL","AGENT_RUNNER_TOKEN","MOREHANDS_PUBLIC_URL","RUNNER_GITHUB_PAT_TEMP","LINEAR_AGENT_PROJECTS","WORKBENCH_RUNNER_TOKEN","CODING_RUNNER_URL","TAVILY_API_KEY"];
     const out={}; for(const k of keys){const v=process.env[k]; if(v&&String(v).trim()) out[k]=String(v);}
     require("fs").writeFileSync(process.env.BULK_FILE, JSON.stringify(out));
   '
@@ -197,9 +197,19 @@ doctor() {
 
   echo "core config:"
   local k
-  for k in OPENROUTER_API_KEY SLACK_SIGNING_SECRET SLACK_BOT_TOKEN_DEFAULT ADMIN_CONNECTIONS_TOKEN; do
+  if [ -n "${ZAI_API_KEY:-}" ] || [ -n "${ZAI_CODING_API_KEY:-}" ]; then
+    ok "default Z.ai provider key set"
+  else
+    bad "ZAI_API_KEY missing (or legacy ZAI_CODING_API_KEY) — required for the default model; fill it in $ENV_FILE"
+  fi
+  for k in SLACK_SIGNING_SECRET SLACK_BOT_TOKEN_DEFAULT ADMIN_CONNECTIONS_TOKEN; do
     if [ -n "${!k:-}" ]; then ok "$k set"; else bad "$k missing (required core — fill it in $ENV_FILE)"; fi
   done
+  if [ -n "${OPENROUTER_API_KEY:-}" ]; then
+    ok "OPENROUTER_API_KEY set (Pi runner / OpenRouter model pins)"
+  else
+    todo "OPENROUTER_API_KEY missing — needed only for the Pi runner or OpenRouter model pins"
+  fi
 
   echo "cloudflare:"
   if wrangler whoami >/dev/null 2>&1; then ok "wrangler logged in"; else bad "wrangler not logged in (run: wrangler login)"; fi

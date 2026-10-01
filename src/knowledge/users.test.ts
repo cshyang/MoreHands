@@ -4,7 +4,7 @@
 // names only (never a token).
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import {
   parseSenderId,
   resolveUserName,
@@ -108,7 +108,7 @@ test('userTools: exposes exactly resolve_user', async () => {
 
 test('resolve_user tool: returns a friendly message for an unresolvable id', async () => {
   const [tool] = userTools(new FakeD1(), undefined);
-  const out = await (tool.execute as (a: unknown) => Promise<unknown>)({ user: 'agent' });
+  const out = await invokeTool(tool, { user: 'agent' });
   assert.match(String(out), /No name available/);
 });
 

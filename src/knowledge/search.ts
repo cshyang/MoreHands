@@ -10,7 +10,7 @@
 // %, _, or a quote), so the `%term%` patterns are always safe to bind.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 
 const RAW_LIMIT = 200; // cap rows pulled for in-JS grouping; a single channel won't exceed this for a real query
@@ -164,15 +164,11 @@ export function searchTools(db: D1Like | undefined, projectId: string): ToolDefi
       'connection. OMIT `query` to instead get the most recent threads, to catch up on what has been ' +
       'happening in the channel. Optionally pass `excludeConversationId` (your current conversationId ' +
       'from the dispatch input) to skip the thread you are replying in.',
-    parameters: Type.Object({
-      query: Type.Optional(
-        Type.String({ description: 'A few topic keywords, e.g. "pricing model". OMIT to list recent activity instead.' }),
-      ),
-      excludeConversationId: Type.Optional(
-        Type.String({ description: 'Your current conversationId from the dispatch input, to skip this thread.' }),
-      ),
+    input: v.object({
+      query: v.optional(v.pipe(v.string(), v.description('A few topic keywords, e.g. "pricing model". OMIT to list recent activity instead.'))),
+      excludeConversationId: v.optional(v.pipe(v.string(), v.description('Your current conversationId from the dispatch input, to skip this thread.'))),
     }),
-    async execute({ query, excludeConversationId }) {
+    async run({ data: { query, excludeConversationId } }) {
       const exclude = excludeConversationId ? String(excludeConversationId) : undefined;
       const q = query ? String(query).trim() : '';
       const threads = q

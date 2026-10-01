@@ -1,6 +1,6 @@
 // Agent-run control-plane invariants — run: npx tsx src/agent-runs/agent-runs.test.ts
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import { claimRunForDispatch, createAgentRun, findLatestRunByLinearIssue, getActiveAgentRunByBranch, getAgentRun, getAgentRunById, handleAgentRunCallback, updateAgentRun } from './repository';
 import { buildRunnerDispatch, claimAndDispatchRun, DISPATCH_MAX_ATTEMPTS, dispatchConcurrencyKey, reconcileAgentRuns, resolveDispatchGithubToken } from './dispatch';
@@ -969,7 +969,7 @@ const activeRoute = (over: Row = {}): Row => ({
   activated_by: 'admin-1', activated_at: 1, disabled_by: null, disabled_at: null, ...over,
 });
 const execAssign = (db: FakeD1, input: Record<string, unknown>, nowMs = 1_750_000_000_000) =>
-  (assignCodingRunTool({ db, projectId: 'P', now: () => nowMs }).execute as (a: unknown) => Promise<string>)(input);
+  invokeTool(assignCodingRunTool({ db, projectId: 'P', now: () => nowMs }), input);
 
 test('assign_coding_run: refuses without an active route (no standing grant, no row written)', async () => {
   const db = new FakeD1();
@@ -1029,7 +1029,7 @@ test('assign_coding_run: ad-hoc work gets a generated branch-safe identifier', a
 // ── check_agent_runs (the run-status visibility tool) ───────────────────────────────────────────
 
 const execCheck = (db: FakeD1, input: Record<string, unknown>, nowMs = 1_750_000_000_000) =>
-  (checkAgentRunsTool({ db, projectId: 'P', now: () => nowMs }).execute as (a: unknown) => Promise<string>)(input);
+  invokeTool(checkAgentRunsTool({ db, projectId: 'P', now: () => nowMs }), input);
 
 test('check_agent_runs: lists recent runs newest first with receipts, never the dispatch payload', async () => {
   const db = new FakeD1();

@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import { dynamicApiProfile, genericApiTool, nangoProxyProfile, PROVIDER_API_PROFILES } from '../providers/generic-api';
 import { disconnectedNotice, disableConnectionByRef, loadConnections, type ConnectionState, type ResolvedConnection } from './repository';
 import { githubReadTools } from '../providers/github';
@@ -186,15 +186,13 @@ export function requestConnectionTool(
       'secure authorization link to share with the person. They click it and authorize off-Slack — you ' +
       "NEVER receive or handle the credential. Once they finish, that provider's tools appear " +
       `automatically. For GitHub, prefer authMode "app" (authorize the GitHub App; it acts on the person's behalf with short-lived, repo-scoped tokens); "oauth" and "pat" (with repo "owner/name") also work. Known providers: ${allowed.join(', ')} — but ANY integration enabled in the workspace's Nango project is connectable; pass its name and it is checked live.`,
-    parameters: Type.Object({
-      provider: Type.String({ description: `The provider to connect, e.g. ${allowed.join(', ')}, or any other integration enabled in Nango.` }),
-      authMode: Type.Optional(Type.String({ description: 'Optional auth mode. For GitHub: "app" (GitHub App, acts on the person\'s behalf, recommended), "oauth" (default), or "pat". Other providers use "oauth".' })),
-      repo: Type.Optional(Type.String({ description: 'Optional GitHub owner/name. Required when provider="github" and authMode="pat".' })),
-      conversationId: Type.Optional(
-        Type.String({ description: 'Copy from the current Dispatch Input (same as your reply) so I can post the link straight into this thread.' }),
-      ),
+    input: v.object({
+      provider: v.pipe(v.string(), v.description(`The provider to connect, e.g. ${allowed.join(', ')}, or any other integration enabled in Nango.`)),
+      authMode: v.optional(v.pipe(v.string(), v.description('Optional auth mode. For GitHub: "app" (GitHub App, acts on the person\'s behalf, recommended), "oauth" (default), or "pat". Other providers use "oauth".'))),
+      repo: v.optional(v.pipe(v.string(), v.description('Optional GitHub owner/name. Required when provider="github" and authMode="pat".'))),
+      conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input (same as your reply) so I can post the link straight into this thread.'))),
     }),
-    async execute({ provider, authMode, repo, conversationId }) {
+    async run({ data: { provider, authMode, repo, conversationId } }) {
       const p = String(provider).toLowerCase();
       if (!allowed.includes(p)) {
         // Not curated — accept anything actually enabled in Nango (the dashboard IS the catalog).
@@ -294,10 +292,10 @@ export function disconnectConnectionTool(
       'Disconnect an external service from THIS channel — revokes access and removes its tools. Pass ' +
       'the provider name. Use when the user asks to disconnect, remove, revoke, or unlink a connection. ' +
       `Works for ANY connected provider (e.g. ${allowed.join(', ')}).`,
-    parameters: Type.Object({
-      provider: Type.String({ description: 'The provider to disconnect — any currently connected provider name.' }),
+    input: v.object({
+      provider: v.pipe(v.string(), v.description('The provider to disconnect — any currently connected provider name.')),
     }),
-    async execute({ provider }) {
+    async run({ data: { provider } }) {
       const p = String(provider).toLowerCase();
       // Find this channel's live connection_ref for the provider (managed-OAuth rows carry it).
       const rows = await loadConnections(args.db, args.projectId).catch(() => []);

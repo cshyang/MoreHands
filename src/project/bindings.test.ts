@@ -17,6 +17,7 @@ import {
   resolveModel,
   assertValidModel,
   DEFAULT_MODEL,
+  hasCataloguedModel,
   agentInstanceId,
   parseAgentInstanceId,
   type BindingRecord,
@@ -231,6 +232,14 @@ test('resolveModel: warns at most once per model id (no per-turn log spam)', asy
   assert.equal(w.lines.length, 1, 'repeat resolves of the same id stay silent');
 });
 
+test('native catalog guards the approved flash default without claiming performance validation', () => {
+  assert.equal(DEFAULT_MODEL, 'zai/glm-5.3-flash');
+  assert.equal(hasCataloguedModel(DEFAULT_MODEL), true);
+  assert.doesNotThrow(() => assertValidModel(DEFAULT_MODEL));
+  assert.equal(hasCataloguedModel('zai/not-a-model'), false);
+  assert.equal(hasCataloguedModel('unknown/glm-5.3-flash'), false);
+});
+
 test('assertValidModel: validated and unpinned (null/undefined/empty) all pass', async () => {
   assert.doesNotThrow(() => assertValidModel('openrouter/xiaomi/mimo-v2.5-pro'));
   assert.doesNotThrow(() => assertValidModel(undefined));
@@ -296,7 +305,8 @@ test('agentInstanceId round-trips through parseAgentInstanceId (with the session
 
 test('the session generation makes the id differ from the legacy (pre-bump) id → a fresh DO', () => {
   const id = agentInstanceId('proj_1', 'conv:X');
-  assert.notEqual(id, 'project:proj_1:agent:default/conv:X', 'bumped id must differ so Flue maps it to a new, empty DO');
+  assert.equal(id, 'project:proj_1:agent:default/conv:X@g2');
+  assert.notEqual(id, 'project:proj_1:agent:default/conv:X@g1', 'Flue 2 must not read incompatible generation-1 session state');
 });
 
 test('parseAgentInstanceId still resolves legacy ids with no generation token (back-compat)', () => {

@@ -5,7 +5,7 @@
 // body, so edits to the skill apply to all future scheduled runs (reference, not copy).
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { upsertReminder, listReminders, cancelReminder, setReminderEnabled } from '../gateway/reminders-store';
 
@@ -23,16 +23,16 @@ export function reminderTools(db: D1Like | undefined, projectId: string): ToolDe
       '`inMs` (once, after a delay), or `runAt` (once, at an epoch-ms time — use the "now" field to compute it). ' +
       'Point it at work with `skill` (name of one of your saved skills — loaded fresh each run) and/or `prompt` ' +
       '(a one-off instruction). When it fires you get a heartbeat turn carrying that skill/prompt.',
-    parameters: Type.Object({
-      id: Type.String({ description: 'Stable reminder id, e.g. "daily-digest".' }),
-      cron: Type.Optional(Type.String({ description: 'KL-time cron "min hour dom mon dow", e.g. "0 9 * * 1" = Mondays 9am.' })),
-      everyMs: Type.Optional(Type.Number({ description: 'Recurring interval in ms.' })),
-      inMs: Type.Optional(Type.Number({ description: 'One-shot delay from now, in ms.' })),
-      runAt: Type.Optional(Type.Number({ description: 'One-shot absolute epoch-ms time.' })),
-      skill: Type.Optional(Type.String({ description: 'Name of a saved skill to run when this fires.' })),
-      prompt: Type.Optional(Type.String({ description: 'A one-off instruction for the run (with or instead of a skill).' })),
+    input: v.object({
+      id: v.pipe(v.string(), v.description('Stable reminder id, e.g. "daily-digest".')),
+      cron: v.optional(v.pipe(v.string(), v.description('KL-time cron "min hour dom mon dow", e.g. "0 9 * * 1" = Mondays 9am.'))),
+      everyMs: v.optional(v.pipe(v.number(), v.description('Recurring interval in ms.'))),
+      inMs: v.optional(v.pipe(v.number(), v.description('One-shot delay from now, in ms.'))),
+      runAt: v.optional(v.pipe(v.number(), v.description('One-shot absolute epoch-ms time.'))),
+      skill: v.optional(v.pipe(v.string(), v.description('Name of a saved skill to run when this fires.'))),
+      prompt: v.optional(v.pipe(v.string(), v.description('A one-off instruction for the run (with or instead of a skill).'))),
     }),
-    async execute({ id, cron, everyMs, inMs, runAt, skill, prompt }) {
+    async run({ data: { id, cron, everyMs, inMs, runAt, skill, prompt } }) {
       const set = await upsertReminder(store(), projectId, {
         id: String(id),
         kind: 'heartbeat',
@@ -49,8 +49,8 @@ export function reminderTools(db: D1Like | undefined, projectId: string): ToolDe
   const listRemindersTool = defineTool({
     name: 'list_reminders',
     description: 'List your scheduled reminders (id, timing, next run, paused state).',
-    parameters: Type.Object({}),
-    async execute() {
+    input: v.object({}),
+    async run() {
       const jobs = await listReminders(store(), projectId);
       if (!jobs.length) return 'No reminders set.';
       return jobs
@@ -66,8 +66,8 @@ export function reminderTools(db: D1Like | undefined, projectId: string): ToolDe
   const cancelReminderTool = defineTool({
     name: 'cancel_reminder',
     description: 'Delete a reminder by id (permanent).',
-    parameters: Type.Object({ id: Type.String({ description: 'Reminder id to cancel.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.string(), v.description('Reminder id to cancel.')) }),
+    async run({ data: { id } }) {
       await cancelReminder(store(), projectId, String(id));
       return `cancelled "${id}".`;
     },
@@ -76,8 +76,8 @@ export function reminderTools(db: D1Like | undefined, projectId: string): ToolDe
   const pauseReminder = defineTool({
     name: 'pause_reminder',
     description: 'Pause a reminder — keeps it but stops it firing, until you resume it.',
-    parameters: Type.Object({ id: Type.String({ description: 'Reminder id to pause.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.string(), v.description('Reminder id to pause.')) }),
+    async run({ data: { id } }) {
       const res = await setReminderEnabled(store(), projectId, String(id), false);
       return res.found ? `paused "${id}".` : `no reminder named "${id}".`;
     },
@@ -86,8 +86,8 @@ export function reminderTools(db: D1Like | undefined, projectId: string): ToolDe
   const resumeReminder = defineTool({
     name: 'resume_reminder',
     description: 'Resume a paused reminder.',
-    parameters: Type.Object({ id: Type.String({ description: 'Reminder id to resume.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.string(), v.description('Reminder id to resume.')) }),
+    async run({ data: { id } }) {
       const res = await setReminderEnabled(store(), projectId, String(id), true);
       return res.found ? `resumed "${id}".` : `no reminder named "${id}".`;
     },

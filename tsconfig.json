@@ -4,8 +4,9 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": ["@cloudflare/workers-types", "node"]
   },
-  "include": ["src/**/*.ts", ".flue/**/*.ts"],
+  "include": ["src/**/*.ts", "vite.config.ts", "flue.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

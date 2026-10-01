@@ -37,7 +37,7 @@ patterns, and help harden the maintainer workflows.
 - Nightly memory/reflection jobs plus scheduled reminders.
 - Deterministic setup/status checks for deployments and integrations.
 
-Since the Flue 0.11 upgrade it deploys as **one Cloudflare Worker plus one Trigger.dev runner**
+It deploys as **one Cloudflare Worker plus one Trigger.dev runner**
 (the old `hatchery-ticker` cron worker is gone — the clock moved in-house):
 
 ```
@@ -67,10 +67,11 @@ flowchart TB
     A --> B --> C --> D --> E
 ```
 
-One agent instance = one conversation (Flue 0.11 thread-as-instance). Instance ids are
-`project:<projectId>:agent:<slug>/<scope>` where the scope picks the lane:
-`conv:<conversationId>` (Slack threads), `heartbeat`, `job:<jobId>` (reminders),
-`reflect:<ts>` (nightly REM), `work:<itemId>` (workbench).
+Each agent instance has its own native conversation. Instance ids are
+`project:<projectId>:agent:<slug>/<scope>@g2` where the scope picks the lane:
+`conv:<conversationId>` (Slack threads), `job:<jobId>` (reminders),
+`reflect:<ts>` (nightly REM), `work:<itemId>` (workbench), and separate review/overhear lanes.
+The generation suffix starts fresh native Flue state without deleting prior Durable Objects.
 
 ### Life of a Slack turn
 
@@ -81,34 +82,37 @@ sequenceDiagram
     participant D as agent DO (conv scope)
     S->>A: event (mention / thread message)
     A->>A: verify signature, KV dedupe, resolve channel binding
-    A->>D: dispatch turn into conv:<id> instance
-    D->>D: assemble prompt: skills + memory + connections + tools
+    A->>A: load fresh nonsecret context, seed delivery tracker
+    A->>D: native dispatch into conv:<id> instance
+    D->>D: render prompt and native tools from snapshot
     D->>S: activity receipts while working
-    D->>S: reply_to_conversation (final answer)
-    D-->>A: transcript logged to D1 messages
+    D->>D: native join + durable completed answer steps
+    D->>D: durable wake reads settled native answer steps
+    D->>S: deliver staged final answer below working ack
+    D->>D: deduplicated transcript and receipt completion
+    Note over A,D: Cron recovers missed wakeups and uncertain post outcomes
 ```
 
 ### The cron clock
 
-Flue 0.11 forwards `scheduled()`, so the Worker hosts its own crons
-(`wrangler.jsonc` `triggers.crons`, mirrored as constants in `.flue/cloudflare.ts`).
+Flue has no scheduler. The Worker hosts its own crons
+(`wrangler.jsonc` `triggers.crons`, mirrored as constants in `src/cloudflare.ts`).
 Each fire calls a token-guarded internal route in-process via `app.fetch` — same routes and
 guards the external ticker used to hit, minus the second worker. Crons are UTC, no DST shift.
 
 | Cron | Route | Purpose |
 |---|---|---|
-| `0 */6 * * *` | `/__heartbeat` | liveness backstop, fans out to active projects |
 | `0 19 * * *` | `/__internal/reflect-sweep` | nightly REM at 03:00 KL — consolidate transcripts into memory |
-| `*/2 * * * *` | `/__internal/agent-runs/reconcile` | agent-run outbox backstop |
+| `*/2 * * * *` | `/__internal/agent-runs/reconcile`, `/__internal/replies/reconcile`, `/__internal/review-sweep` | coding-run and Slack delivery recovery; budgeted review |
 | `* * * * *` | `/__internal/scheduled` (per due job) | agent-set reminders, stored in D1, claimed via CAS |
 
 ## Module map
 
 | Module | What it does |
 |---|---|
-| `.flue/app.ts` | Worker entry: all HTTP ingress (Slack events/commands, Linear + Nango webhooks, `__internal`/`__admin` routes) |
-| `.flue/cloudflare.ts` | Cron clock (`scheduled` handler) + `Sandbox` class export |
-| `.flue/agents/project.ts` | The agent definition: assembles skills, memory, connections, and tools per instance |
+| `src/app.ts` | Worker entry: all HTTP ingress (Slack events/commands, Linear + Nango webhooks, `__internal`/`__admin` routes) |
+| `src/cloudflare.ts` | Product cron clock, `Sandbox` export, retired registry namespace preservation |
+| `src/agent/project.ts` | The agent definition: assembles skills, memory, connections, and tools per instance |
 | `src/agent` | System-prompt assembly and the agent's self-status tool |
 | `src/project` | Channel→project bindings, conversation reply targets, model resolution (D1: `bindings`, `conversation_targets`) |
 | `src/slack` | Slack event handling, activity receipts, blocks, slash commands, file auth |
@@ -127,8 +131,13 @@ guards the external ticker used to hit, minus the second worker. Crons are UTC, 
 | `agent-kits/` | Markdown agent definitions + skills for the Pi runner (`coding-default` live; `delivery` — the gated plan→implement→review pipeline — wired end-to-end but not yet activated on any route) |
 
 Bindings: D1 `hatchery-skills` (`DB`), KV `SLACK_EVENTS`, DO `SANDBOX` (container), and a
-Dynamic Worker loader. Flue generates the agent DO bindings (`FLUE_PROJECT_AGENT`,
-`FLUE_REGISTRY`) itself.
+Dynamic Worker loader. Flue generates the agent DO binding `FLUE_PROJECT_AGENT` itself.
+Flue 2 owns conversation history, execution retries, joined deliveries, and stream persistence.
+The Slack reply outbox tracks external delivery only; it does not replace Flue's history.
+One pinned internal adapter reads canonical assistant-step records because folded public history loses
+the distinction between tool narration and final answers. It also reads durable admission metadata
+to heal a dispatch receipt lost before canonical input is written. Unknown post outcomes require a positive
+Slack metadata match; they are never blindly reposted.
 
 Deeper docs: [docs/deployment.md](docs/deployment.md) (setup, secrets, dashboard wiring),
 [docs/runner-contract.md](docs/runner-contract.md) (MoreHands ⇄ runner protocol),
@@ -140,7 +149,7 @@ including the [Flue 0.11 upgrade](docs/planning/flue-011-upgrade.md)).
 ## Day-to-day
 
 ```bash
-npm run deploy     # gated: tsc --noEmit && npm test && flue build && wrangler deploy
+npm run deploy     # gated: tsc --noEmit && npm test && vite build && wrangler deploy
 npm test           # full suite (tsx)
 npm run typecheck  # tsc --noEmit
 ```
@@ -151,5 +160,6 @@ After adding a migration, `wrangler d1 migrations apply hatchery-skills --remote
 ## Local dev
 
 Put a throwaway `ZAI_API_KEY` (and any secrets you want to exercise) in `.dev.vars`, then
-`npx flue dev --target cloudflare`. Note: model-call failures locally are often local-egress flakiness
-— verify model-dependent changes against a deployed Worker, not `flue dev`.
+`npm run dev`. Use `zai/glm-5.3-flash` for migration canaries. Local model and fake-Slack tests do
+not prove production delivery or Cloudflare rollout safety; deploy separately after reviewing
+[the cutover checklist](docs/deployment.md#flue-2-cutover).

@@ -1,31 +1,33 @@
 import { Hono } from 'hono';
-import { flue } from '@flue/runtime/routing';
-import { dispatch, observe } from '@flue/runtime';
-import { verifySlackSignature } from '../src/slack/verify';
-import { fetchChannelHistory, fetchThreadReplies, renderThreadBackscroll } from '../src/slack/threads';
-import { mentionsBot, stripMention } from '../src/slack/mentions';
-import { postWorkingAck } from '../src/slack/ack';
-import { createSlackTurnActivity, handleObservedSlackActivity, reapStaleTurnActivities } from '../src/slack/activity';
-import { claimPendingMessages, findAbsorbingTurn, insertPendingMessage, listStragglerConversations, renderPendingMessages } from '../src/slack/absorb';
-import { addReaction } from '../src/slack/post';
-import { recordSlackConversationFiles } from '../src/slack/file-authorizations';
-import { dispatchSlackTurnWithFallback } from '../src/slack/dispatch';
-import { parseSlashCommandPayload, runSlashCommand } from '../src/slack/commands';
+import { observe } from '@flue/runtime';
+import { dispatchProject } from './gateway/dispatch';
+import { verifySlackSignature } from './slack/verify';
+import { fetchChannelHistory, fetchThreadReplies, renderThreadBackscroll } from './slack/threads';
+import { mentionsBot, stripMention } from './slack/mentions';
+import { postWorkingAck } from './slack/ack';
+import { createSlackTurnActivity, handleObservedSlackActivity } from './slack/activity';
+import { findActiveSlackTurnActivity } from './slack/activity';
+import { addReaction } from './slack/post';
+import { recordSlackConversationFiles } from './slack/file-authorizations';
+import { dispatchSlackTurnWithFallback } from './slack/dispatch';
+import { seedReplyTracker, attachReplySubmission } from './slack/delivery';
+import type { DispatchReceipt } from '@flue/runtime';
+import { parseSlashCommandPayload, runSlashCommand } from './slack/commands';
 import {
   parseSlackEventEnvelope,
   slackEventId,
   slackUrlVerification,
   slackUserMessageEvent,
   isDirectMessage,
-} from '../src/slack/events';
-import { bindings, bindingBySlack, bindingByProject, agentInstanceId, autoCreateBinding } from '../src/project/bindings';
-import { loadPersona } from '../src/project/persona';
-import { deploymentConfig, isKnownTeam } from '../src/config/deployment';
-import { normalizeSlackMessage } from '../src/shared/canonical';
-import { upsertConversationTarget, loadAgentEpoch, bumpAgentEpoch, conversationScope, resolveTarget } from '../src/project/conversations';
-import { claimEvent, type KVLike } from '../src/shared/idempotency';
-import type { D1Like } from '../src/skills/repository';
-import { agentPostedInConversation, logMessage, projectsWithUnreflected, projectsWithUnreflectedRuns, takeUnreflectedBatch, takeUnreflectedRuns, buildReflectInstructions } from '../src/knowledge/reflection';
+} from './slack/events';
+import { bindingBySlack, bindingByProject, agentInstanceId, autoCreateBinding } from './project/bindings';
+import { loadPersona } from './project/persona';
+import { deploymentConfig, isKnownTeam } from './config/deployment';
+import { normalizeSlackMessage } from './shared/canonical';
+import { upsertConversationTarget, loadAgentEpoch, bumpAgentEpoch, conversationScope } from './project/conversations';
+import { claimEvent, type KVLike } from './shared/idempotency';
+import type { D1Like } from './skills/repository';
+import { agentPostedInConversation, logMessage, projectsWithUnreflected, projectsWithUnreflectedRuns, takeUnreflectedBatch, takeUnreflectedRuns, buildReflectInstructions } from './knowledge/reflection';
 import {
   isTrivialChatter,
   projectsToReview,
@@ -35,35 +37,34 @@ import {
   overheardLine,
   loadReviewState,
   answerBudgetFree,
-} from '../src/review';
-import { upsertConnection, loadConnections, connectedNotice, disconnectedNotice, disableConnectionByRef } from '../src/connections/repository';
-import { verifyNangoWebhook, parseNangoAuthWebhook, parseNangoDeletionWebhook, fetchProviderApiSpec } from '../src/providers/nango';
-import { isCatalogProvider } from '../src/connections/catalog';
-import { buildScheduledInput } from '../src/gateway/scheduled';
-import { hasMatchingSecretHeader } from '../src/gateway/auth';
-import { readJsonOrNull } from '../src/gateway/json';
-import { postConnectionNotice } from '../src/connections/notices';
-import { handleInternalWorkItemRequest } from '../src/workbench/gateway';
-import { handleSourceChangeRunCallback } from '../src/workbench/source-change';
-import { handleLinearComment, handleLinearWebhook } from '../src/agent-runs/linear';
-import { handleAgentRunCallback, type AgentRun } from '../src/agent-runs/repository';
-import { moveLinearIssueState, postLinearComment, replyTextForCallback } from '../src/agent-runs/linear-reply';
-import { reconcileAgentRuns } from '../src/agent-runs/dispatch';
-import { resolveProviderToken } from '../src/connections/repository';
-import { activateAgentRunRoute, disableAgentRunRoute } from '../src/agent-runs/events';
-import { handleNangoForwardWebhook } from '../src/agent-runs/provider-events';
-import { deliverPendingSlackRunNotifications } from '../src/agent-runs/notifications';
-import { listCodeExecutionAudits } from '../src/code-mode/code-mode';
+} from './review';
+import { upsertConnection, loadConnections, connectedNotice, disconnectedNotice, disableConnectionByRef } from './connections/repository';
+import { verifyNangoWebhook, parseNangoAuthWebhook, parseNangoDeletionWebhook, fetchProviderApiSpec } from './providers/nango';
+import { isCatalogProvider } from './connections/catalog';
+import { buildScheduledInput } from './gateway/scheduled';
+import { hasMatchingSecretHeader } from './gateway/auth';
+import { readJsonOrNull } from './gateway/json';
+import { reconcileReplies, reconcileNativeReplies, type ReplyAgentNamespace } from './gateway/replies';
+import { postConnectionNotice } from './connections/notices';
+import { handleInternalWorkItemRequest } from './workbench/gateway';
+import { handleSourceChangeRunCallback } from './workbench/source-change';
+import { handleLinearComment, handleLinearWebhook } from './agent-runs/linear';
+import { handleAgentRunCallback, type AgentRun } from './agent-runs/repository';
+import { moveLinearIssueState, postLinearComment, replyTextForCallback } from './agent-runs/linear-reply';
+import { reconcileAgentRuns } from './agent-runs/dispatch';
+import { resolveProviderToken } from './connections/repository';
+import { activateAgentRunRoute, disableAgentRunRoute } from './agent-runs/events';
+import { handleNangoForwardWebhook } from './agent-runs/provider-events';
+import { deliverPendingSlackRunNotifications } from './agent-runs/notifications';
+import { listCodeExecutionAudits } from './code-mode/code-mode';
 
-// Custom front-controller. Flue mounts this app.ts as the Worker entry; we add
-// the Slack ingress, then hand everything else to flue() (the /agents, /workflows,
-// /runs, /admin routes). This is the gateway from docs/planning: verify → route →
-// dispatch, acknowledging Slack fast and letting the agent reply asynchronously.
+// Application-owned ingress verifies and routes product events before native dispatch.
+// The Project agent has no public transport: Slack and internal token guards own admission.
 
 interface Env {
   SLACK_SIGNING_SECRET?: string;
   SLACK_EVENTS?: KVLike; // KV namespace for event_id idempotency
-  HEARTBEAT_TOKEN?: string; // shared secret guarding the /__heartbeat trigger
+  HEARTBEAT_TOKEN?: string; // shared secret guarding internal scheduler/reconciliation routes
   WORKBENCH_RUNNER_TOKEN?: string; // dedicated secret for source-change runner callbacks
   CODING_RUNNER_URL?: string; // generic source-change runner dispatch endpoint
   LINEAR_WEBHOOK_SECRET?: string; // Linear raw-body HMAC signing secret for /linear/webhook
@@ -88,7 +89,9 @@ interface Env {
   CODE_EXEC_CPU_MS?: string;
   CODE_EXEC_SUBREQUESTS?: string;
   DB?: D1Like; // D1 skill catalog, transcript, memory, and conversation targets
-  ZAI_CODING_API_KEY?: string; // Z.ai GLM coding-plan key — registers the 'zai-coding' model provider (src/agent/providers.ts)
+  FLUE_PROJECT_AGENT?: ReplyAgentNamespace;
+  ZAI_API_KEY?: string; // canonical key for the native Z.ai provider
+  ZAI_CODING_API_KEY?: string; // legacy deployment alias, normalized by src/agent/providers.ts
   [binding: string]: unknown;
 }
 
@@ -101,46 +104,24 @@ observe((event, ctx) => {
 // from env per request via deploymentConfig(c.env) — see src/config/deployment.ts. Falls back to the
 // original Ecodark literals when unset, so an existing deployment is unchanged.
 
-// Liveness backstop. The 6h cron poke (and any manual /__heartbeat) wakes each active
-// project with NO specific work — the agent stays silent unless it has a self-scheduled
-// reminder due. A caller MAY pass {topic} to give the wake something to act on. Per-job
-// scheduled work arrives via /__internal/scheduled instead, carrying its skill/prompt.
-// The cron clock lives in .flue/cloudflare.ts (in-house since Flue 0.11 forwards `scheduled`).
-async function fireHeartbeat(topic?: string): Promise<number> {
-  const active = bindings.filter((b) => b.status === 'active');
-  const now = new Date().toISOString();
-  await Promise.all(
-    active.map((b) =>
-      dispatch({
-        agent: 'project',
-        id: agentInstanceId(b.projectId, 'heartbeat'),
-        input: { kind: 'heartbeat', now, ...(topic ? { topic } : {}) },
-      }),
-    ),
-  );
-  return active.length;
-}
-
 const app = new Hono<{ Bindings: Env }>();
 
 function requireHeartbeat(c: { env: Env; req: { header(n: string): string | undefined } }): boolean {
   return hasMatchingSecretHeader(c.env.HEARTBEAT_TOKEN, c.req.header('x-morehands-token'));
 }
 
-// Manual heartbeat trigger. Token-guarded (inert unless HEARTBEAT_TOKEN is set
-// and the x-morehands-token header matches) so it can't be fired publicly. An
-// optional {topic} in the body overrides the default.
-app.post('/__heartbeat', async (c) => {
+// Lost native wakes must not strand durable capture, Slack delivery or receipt repair.
+app.post('/__internal/replies/reconcile', async (c) => {
   if (!requireHeartbeat(c)) return c.body(null, 404);
-  const body = await readJsonOrNull<{ topic?: string }>(() => c.req.json());
-  const topic = body?.topic ? String(body.topic) : undefined;
-  const dispatched = await fireHeartbeat(topic);
-  return c.json({ dispatched, topic: topic ?? null });
+  if (!c.env.DB) return c.json({ reconciled: false, reason: 'no DB binding' });
+  const summary = await reconcileReplies(c.env.DB, c.env, {
+    reconcileInstance: (id) => reconcileNativeReplies(c.env.FLUE_PROJECT_AGENT, id),
+  });
+  return c.json(summary);
 });
 
-// Per-job fire from the minutely reminder scan in .flue/cloudflare.ts (the agent's
-// self-scheduled work, stored in the D1 reminders table). Unlike /__heartbeat (which fans
-// out to every active project), this targets ONE project, in an instance scope dedicated
+// Per-job fire from the minutely reminder scan (the agent's self-scheduled work,
+// stored in the D1 reminders table). This targets ONE project, in an instance scope dedicated
 // to the job id so each named schedule keeps its own memory. `fireId` makes it idempotent
 // against scan retries via the same KV claim layer.
 app.post('/__internal/scheduled', async (c) => {
@@ -172,9 +153,10 @@ app.post('/__internal/scheduled', async (c) => {
   if (scheduled.skipped) return c.json({ skipped: scheduled.skipped });
   const input = scheduled.input;
 
-  await dispatch({
+  await dispatchProject(c.env, {
     agent: 'project',
     id: agentInstanceId(body.projectId, `job:${body.jobId}`),
+    idempotencyKey: `sched:${body.fireId}`,
     input,
   });
   return c.json({ dispatched: true, jobId: body.jobId, skill: input.skill ?? null });
@@ -191,7 +173,7 @@ app.post('/__internal/work-items', async (c) => {
       actualToken: c.req.header('x-morehands-token'),
       body: await readJsonOrNull(() => c.req.json()),
     },
-    { bindingByProject, dispatch },
+    { bindingByProject, dispatch: (request) => dispatchProject(c.env, request) },
   );
   if (result.status === 404) return c.body(null, 404);
   return c.json(result.body ?? {}, result.status as 200 | 400 | 500);
@@ -343,86 +325,10 @@ app.post('/__internal/agent-runs/reconcile', async (c) => {
     fetch,
   });
   const notifications = await deliverPendingSlackRunNotifications({ db, env: c.env as Record<string, unknown> });
-  // Dead-turn reaper: a receipt stuck 'active' past the stale window is a died turn — mark it
-  // failed and edit the eternal "⏳ Working" into an honest retry prompt. Failure-isolated.
-  const reapedTurns = await reapStaleTurnActivities(db, c.env as Record<string, unknown>, {
-    bumpEpoch: (projectId, conversationId) => bumpAgentEpoch(db, projectId, conversationId),
-    retryTurn: (row) => retrySlackDoaTurn(db, c.env as Record<string, unknown>, row),
-  }).catch((e) => {
-    console.log(`[activity] reap sweep failed: ${e instanceof Error ? e.message : 'error'}`);
-    return 0;
-  });
-  // Burst-absorb safety net: parked messages whose conversation has no live turn to drain
-  // them (post-drain stragglers, or a turn that died holding rows) get one combined turn.
-  const sweptPending = await sweepPendingMessages(db, c.env as Record<string, unknown>).catch((e) => {
-    console.log(`[absorb] pending sweep failed: ${e instanceof Error ? e.message : 'error'}`);
-    return 0;
-  });
-  return c.json({ ...summary, notifications, reapedTurns, sweptPending });
+  // Native submission deadlines and canonical settlement own agent-turn termination.
+  // A Slack receipt clock must never resend or terminalize work the native runtime still owns.
+  return c.json({ ...summary, notifications });
 });
-
-// Burst-absorb sweep (docs/planning/burst-absorb.md). For each conversation holding pending
-// rows past the grace window with NO fresh in-flight turn, dispatch ONE combined turn —
-// gateway-style: fresh ack + receipt + thread backscroll, same rebuild shape as the dead-turn
-// retry above. Claims rows as 'dispatched' so the drain can never double-deliver them.
-async function sweepPendingMessages(db: NonNullable<Env['DB']>, env: Record<string, unknown>): Promise<number> {
-  const stragglers = await listStragglerConversations(db);
-  let swept = 0;
-  for (const { projectId, conversationId } of stragglers) {
-    // A fresh active turn will drain these at reply time — leave them to it.
-    const absorbing = await findAbsorbingTurn(db, projectId, conversationId).catch(() => null);
-    if (absorbing) continue;
-    const binding = await bindingByProject(projectId, db);
-    if (!binding) continue;
-    const target = await resolveTarget(db, binding, projectId, 'default', conversationId);
-    if (!target) continue;
-
-    const pending = await claimPendingMessages(db, projectId, conversationId, 'dispatched');
-    if (pending.length === 0) continue; // raced to empty
-
-    const token = env[binding.transportTokenRef];
-    const tokenStr = typeof token === 'string' && token ? token : undefined;
-    const persona = await loadPersona(db, projectId).catch(() => null);
-    const ackMessageTs = await postWorkingAck({
-      token: tokenStr,
-      channel: target.externalSpaceId,
-      threadTs: target.externalConversationId ?? '', // '' = top-level post (postMessage omits empty thread_ts)
-      persona,
-    });
-    if (ackMessageTs) {
-      await createSlackTurnActivity(db, {
-        projectId,
-        sessionId: `conv:${conversationId}`,
-        conversationId,
-        slackChannelId: target.externalSpaceId,
-        slackThreadTs: target.externalConversationId ?? '',
-        ackMessageTs,
-        transportTokenRef: binding.transportTokenRef,
-      }).catch(() => {});
-    }
-    const threadReplies =
-      tokenStr && target.externalConversationId
-        ? await fetchThreadReplies(tokenStr, target.externalSpaceId, target.externalConversationId).catch(() => [])
-        : [];
-    const epoch = await loadAgentEpoch(db, projectId, conversationId).catch(() => 0);
-
-    await dispatch({
-      agent: 'project',
-      id: agentInstanceId(projectId, conversationScope(conversationId, epoch)),
-      input: {
-        message: pending.length === 1 ? pending[0].text : renderPendingMessages(pending),
-        conversationId,
-        ...(ackMessageTs ? { ackMessageTs } : {}),
-        provider: 'slack',
-        accountId: target.externalAccountId,
-        senderId: pending[pending.length - 1].senderId,
-        ...(threadReplies.length ? { threadContext: renderThreadBackscroll(threadReplies, binding.transportBotId) } : {}),
-      },
-    });
-    swept++;
-  }
-  return swept;
-}
 
 // Nightly REM: the nightly cron in .flue/cloudflare.ts pokes this. The GATE is cheap SQL (projects
 // with messages OR terminal runs past their watermarks) — idle projects never dispatch a
@@ -441,7 +347,7 @@ app.post('/__internal/reflect-sweep', async (c) => {
     const transcript = await takeUnreflectedBatch(db, projectId);
     const runDigest = await takeUnreflectedRuns(db, projectId);
     if (!transcript && !runDigest) continue; // raced to empty; skip
-    await dispatch({
+    await dispatchProject(c.env, {
       agent: 'project',
       id: agentInstanceId(projectId, `reflect:${Date.now()}`), // fresh instance — no carryover, no thread pollution
       input: { kind: 'heartbeat', now, instructions: buildReflectInstructions(transcript, runDigest) },
@@ -450,62 +356,6 @@ app.post('/__internal/reflect-sweep', async (c) => {
   }
   return c.json({ swept });
 });
-
-// Auto-retry for a first-strike dead-on-arrival turn: rebuild the dispatch from durable state
-// (the transcript's last user message, the conversation target, the binding) and send the SAME
-// turn again — reusing the original ack ts so the thread stays one evolving message. Only the
-// reaper calls this, only on DOA strike one; strike two takes the epoch-reset path instead.
-async function retrySlackDoaTurn(
-  db: NonNullable<Env['DB']>,
-  env: Record<string, unknown>,
-  row: { projectId: string; sessionId: string; conversationId: string; ackMessageTs: string },
-): Promise<boolean> {
-  const binding = await bindingByProject(row.projectId, db);
-  if (!binding) return false;
-  const target = await resolveTarget(db, binding, row.projectId, 'default', row.conversationId);
-  if (!target) return false;
-  const lastUser = await db
-    .prepare("SELECT sender_id, text FROM messages WHERE project_id=? AND conversation_id=? AND role='user' ORDER BY id DESC LIMIT 1")
-    .bind(row.projectId, row.conversationId)
-    .first<{ sender_id: string; text: string }>();
-  if (!lastUser?.text) return false;
-
-  const token = env[binding.transportTokenRef];
-  const threadReplies =
-    typeof token === 'string' && token && target.externalConversationId
-      ? await fetchThreadReplies(token, target.externalSpaceId, target.externalConversationId).catch(() => [])
-      : [];
-  const epoch = await loadAgentEpoch(db, row.projectId, row.conversationId).catch(() => 0);
-
-  // Reset the receipt to active so the retried turn's beats land on a fresh clock.
-  await createSlackTurnActivity(db, {
-    projectId: row.projectId,
-    sessionId: row.sessionId,
-    conversationId: row.conversationId,
-    slackChannelId: target.externalSpaceId,
-    slackThreadTs: target.externalConversationId ?? '',
-    ackMessageTs: row.ackMessageTs,
-    transportTokenRef: binding.transportTokenRef,
-  });
-
-  await dispatch({
-    agent: 'project',
-    id: agentInstanceId(row.projectId, conversationScope(row.conversationId, epoch)),
-    input: {
-      message: lastUser.text,
-      conversationId: row.conversationId,
-      ...(row.ackMessageTs ? { ackMessageTs: row.ackMessageTs } : {}),
-      provider: 'slack',
-      accountId: target.externalAccountId,
-      senderId: lastUser.sender_id,
-      retryOfDeadTurn: true,
-      ...(threadReplies.length
-        ? { threadContext: renderThreadBackscroll(threadReplies, binding.transportBotId) }
-        : {}),
-    },
-  });
-  return true;
-}
 
 // Proactive review sweep (Layer 4): the */2 cron pokes this. Tier-1 gate is pure SQL (unreviewed
 // candidate messages AND channel quiet/max-wait AND a budget free) — idle channels cost one query,
@@ -522,7 +372,7 @@ app.post('/__internal/review-sweep', async (c) => {
   for (const projectId of projects) {
     const batch = await takeReviewBatch(db, projectId);
     if (!batch) continue; // raced to empty; skip
-    await dispatch({
+    await dispatchProject(c.env, {
       agent: 'project',
       id: agentInstanceId(projectId, `review:${Date.now()}`), // fresh instance — no carryover, no thread pollution
       input: { kind: 'heartbeat', now, instructions: buildReviewInstructions(batch) },
@@ -541,9 +391,8 @@ function requireAdmin(c: { env: Env; req: { header(n: string): string | undefine
   return hasMatchingSecretHeader(c.env.ADMIN_CONNECTIONS_TOKEN, c.req.header('x-morehands-admin-token'));
 }
 
-// Manual wedged-session reset: bump a conversation's epoch so its next turn starts a fresh
-// session DO. The reaper does this automatically after two consecutive dead-on-arrival turns;
-// this route is the operator override for anything it misses.
+// Operator reset: preserve the epoch escape hatch so the next turn starts a fresh native
+// instance. Normal failures and retries remain owned by native submission durability.
 app.post('/__admin/conversations/reset', async (c) => {
   if (!requireAdmin(c)) return c.body(null, 404);
   const db = c.env.DB;
@@ -803,10 +652,11 @@ app.post('/slack/events', async (c) => {
       if (overhearing) {
         const state = await loadReviewState(c.env.DB, msg.projectId).catch(() => null);
         if (answerBudgetFree(state, Date.now())) {
-          await dispatch({
+          await dispatchProject(c.env, {
             agent: 'project',
             // Fresh instance keyed to the message — no thread/session carryover, idempotent per message.
             id: agentInstanceId(msg.projectId, `overhear:${ev.ts}`),
+            idempotencyKey: `overhear:${eventId}`,
             input: {
               kind: 'heartbeat',
               now: new Date().toISOString(),
@@ -832,11 +682,6 @@ app.post('/slack/events', async (c) => {
       externalConversationId: msg.externalConversationId,
       transportTokenRef: binding.transportTokenRef,
     });
-    await recordSlackConversationFiles(c.env.DB, {
-      projectId: msg.projectId,
-      conversationId: msg.conversationId,
-      files: ev.files,
-    });
   }
 
   // Idempotency: Slack redelivers the same event_id on retry (at-least-once). Claim it before
@@ -845,47 +690,27 @@ app.post('/slack/events', async (c) => {
   if (!(await claimEvent(c.env.SLACK_EVENTS, eventId))) {
     return c.body(null, 200); // duplicate delivery — already handled
   }
-
-  // Burst-absorb (docs/planning/burst-absorb.md): a FRESH in-flight turn for this conversation
-  // means this message should fold into THAT answer — park it instead of queueing a redundant
-  // turn. The in-flight turn's reply drain (or the reconcile sweep) picks it up. Messages with
-  // files bypass absorb: file authorizations are scoped to the turn that received them. A park
-  // failure falls through to the normal dispatch path — a message is never lost to a D1 hiccup.
-  if (c.env.DB && !ev.files?.length) {
-    const absorbing = await findAbsorbingTurn(c.env.DB, msg.projectId, msg.conversationId).catch(() => null);
-    if (absorbing) {
-      const parked = await insertPendingMessage(c.env.DB, {
-        projectId: msg.projectId,
-        conversationId: msg.conversationId,
-        senderId: msg.senderId,
-        text: msg.text,
-        slackTs: ev.ts,
-      })
-        .then(() => true)
-        .catch(() => false);
-      if (parked) {
-        await logMessage(c.env.DB, {
-          projectId: msg.projectId,
-          conversationId: msg.conversationId,
-          senderId: msg.senderId,
-          role: 'user',
-          text: msg.text,
-        }).catch(() => {});
-        // 👀 instead of a second "On it…": seen, will be answered with the in-flight reply.
-        if (token) c.executionCtx.waitUntil(addReaction(token, ev.channel, ev.ts, 'eyes'));
-        return c.body(null, 200);
-      }
-    }
+  if (c.env.DB) {
+    await recordSlackConversationFiles(c.env.DB, {
+      projectId: msg.projectId,
+      conversationId: msg.conversationId,
+      files: ev.files,
+    });
   }
 
-  // Post the deterministic "I'm on it" after the idempotency claim (so retries can't double-post it)
-  // and CAPTURE its ts, so the turn edits this same message into the real reply instead of stacking
-  // ack + answer. Awaited because the dispatch input below carries the ts to the model; a Slack
-  // hiccup returns undefined and the reply degrades to a fresh post — never a blocked turn.
-  // Persona on the ack: edits inherit the posted identity, so this one post is what makes the
-  // whole evolving message (receipts → final reply) wear the channel's hatched name.
+  // A busy conversation joins the native response immediately. This gate controls only
+  // Slack chrome: it never parks, drains, or suppresses a distinct accepted input.
+  const activeTurn = c.env.DB
+    ? await findActiveSlackTurnActivity(c.env.DB, msg.projectId, msg.conversationId).catch(() => null)
+    : null;
+  if (activeTurn && token) c.executionCtx.waitUntil(addReaction(token, ev.channel, ev.ts, 'eyes'));
+
+  // Post the working acknowledgement after the event claim and capture its timestamp
+  // for progress and completed/failed receipt chrome. Final answers post separately below it.
+  // A Slack hiccup returns undefined without blocking admission. The same trusted persona
+  // is captured for the answer outbox; later progress cannot overwrite that answer.
   const ackPersona = c.env.DB ? await loadPersona(c.env.DB, msg.projectId).catch(() => null) : null;
-  const ackMessageTs = await postWorkingAck({
+  const ackMessageTs = activeTurn ? undefined : await postWorkingAck({
     token,
     channel: msg.externalSpaceId,
     threadTs: msg.externalConversationId,
@@ -916,22 +741,43 @@ app.post('/slack/events', async (c) => {
     }).catch(() => {});
   }
 
-  // Epoch-aware instance id: a wedged conversation's epoch was bumped (by the reaper or the
-  // admin reset route), so this turn lands in a FRESH session DO instead of the poisoned one.
+  // Epoch-aware instance id: an operator reset routes the next turn to a fresh native instance.
   const agentEpoch = c.env.DB ? await loadAgentEpoch(c.env.DB, msg.projectId, msg.conversationId).catch(() => 0) : 0;
+  const instanceId = agentInstanceId(msg.projectId, conversationScope(msg.conversationId, agentEpoch));
+  if (c.env.DB) {
+    await seedReplyTracker(c.env.DB, {
+      instanceId,
+      eventId,
+      target: {
+        projectId: msg.projectId,
+        agentSlug: 'default',
+        conversationId: msg.conversationId,
+        provider: 'slack',
+        externalAccountId: msg.externalAccountId,
+        externalSpaceId: msg.externalSpaceId,
+        externalConversationId: msg.externalConversationId,
+        transportTokenRef: binding.transportTokenRef,
+      },
+      persona: ackPersona,
+      ...(ackMessageTs ? { ackMessageTs } : {}),
+      publish: true,
+    });
+  }
 
   await dispatchSlackTurnWithFallback(
     {
       agent: 'project',
-      id: agentInstanceId(msg.projectId, conversationScope(msg.conversationId, agentEpoch)),
+      id: instanceId,
+      eventId,
+      idempotencyKey: `slack:${eventId}`,
       // Forward the author identity in neutral terms so history retains who said what — the
       // future reflection job reads senderId from it to attribute facts. (The initializer itself
       // can't see this; only the model does.)
       input: {
         message: msg.text,
         conversationId: msg.conversationId,
-        // The ack's ts — the model relays it back to reply_to_conversation/update_status so its
-        // message edits the "On it…" note in place. Omitted if the ack didn't post (no ts to edit).
+        // Preserve the product envelope for status tools; final delivery uses the trusted tracker.
+        // Omitted for joined input so it never borrows an earlier receipt after that response closes.
         ...(ackMessageTs ? { ackMessageTs } : {}),
         provider: msg.provider,
         accountId: msg.externalAccountId,
@@ -961,7 +807,20 @@ app.post('/slack/events', async (c) => {
       channel: msg.externalSpaceId,
       threadTs: msg.externalConversationId,
     },
-    { dispatch },
+    {
+      dispatch: (request) => dispatchProject(c.env, request),
+      onRejected: async () => {
+        if (c.env.DB) await c.env.DB.prepare(`UPDATE slack_reply_trackers SET status='failed',outcome='failed',updated_at=?
+          WHERE instance_id=? AND event_id=? AND submission_id IS NULL AND status='pending'`)
+          .bind(Date.now(), instanceId, eventId).run();
+      },
+      onAccepted: async (accepted) => {
+        const receipt = accepted as DispatchReceipt;
+        if (c.env.DB) await attachReplySubmission(c.env.DB, {
+          instanceId, eventId, submissionId: receipt.submissionId, uid: receipt.uid,
+        });
+      },
+    },
   );
 
   return c.body(null, 200); // ack within Slack's 3s window; agent replies async
@@ -998,8 +857,5 @@ app.post('/slack/commands', async (c) => {
   });
   return c.json({ response_type: 'ephemeral', text });
 });
-
-// Everything else → Flue's built-in agent / workflow / run routes.
-app.route('/', flue());
 
 export default app;

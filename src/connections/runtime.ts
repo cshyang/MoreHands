@@ -1,5 +1,5 @@
 import type { ToolDefinition } from '@flue/runtime';
-import type { Binding } from '../project/bindings';
+import type { Binding, ConnectionSpec } from '../project/bindings';
 import { connectionState, loadConnectionSpecs, resolveConnection, type ConnectionState, type ResolvedConnection } from './repository';
 import {
   connectionTools,
@@ -38,22 +38,38 @@ export interface ConnectionRuntime {
   providerCatalog: ProviderCatalogEntry[];
 }
 
-/** Build the connection-facing part of the project agent initializer. Keeps .flue/agents/project.ts
- *  from knowing how connection specs, resolved credentials, Nango self-service tools, and prompt text
- *  fit together. */
-export async function buildConnectionRuntime(args: {
+export interface ConnectionSnapshot {
+  specs: ConnectionSpec[];
+  enabledIntegrations: NangoIntegration[];
+}
+
+/** Load metadata at the gateway, before dispatch. Credentials and tool closures never cross
+ *  this seam; the agent resolves them from its own isolate's bindings. */
+export async function loadConnectionSnapshot(args: {
   db: D1Like | undefined;
   binding: Binding;
   env: Record<string, unknown>;
-  projectId: string;
-  /** Injectable for tests; defaults to the live Nango list (cached a few minutes). */
   listIntegrationsImpl?: typeof listIntegrations;
-  /** Post a connect link straight into the thread so request_connection never feeds the
-   *  high-entropy URL to the model (the connection-turn stall). Wired by the agent. */
-  postConnectionLink?: (input: { conversationId: string; text: string }) => Promise<boolean>;
-}): Promise<ConnectionRuntime> {
-  const { db, binding, env, projectId } = args;
+}): Promise<ConnectionSnapshot> {
+  const { db, binding, env } = args;
   const specs = await loadConnectionSpecs(db, binding).catch(() => binding.connections ?? []);
+  const secretKey = typeof env.NANGO_SECRET_KEY === 'string' ? env.NANGO_SECRET_KEY : '';
+  const available = db && secretKey
+    ? await enabledIntegrations(secretKey, args.listIntegrationsImpl ?? listIntegrations)
+    : [];
+  return { specs, enabledIntegrations: available };
+}
+
+/** Synchronous render-time assembly from metadata. Nango tokens remain lazy broker thunks. */
+export function connectionRuntimeFromSnapshot(args: {
+  db: D1Like | undefined;
+  env: Record<string, unknown>;
+  projectId: string;
+  snapshot: ConnectionSnapshot;
+  postConnectionLink?: (input: { conversationId: string; text: string }) => Promise<boolean>;
+}): ConnectionRuntime {
+  const { db, env, projectId } = args;
+  const { specs, enabledIntegrations: available } = args.snapshot;
   const state = connectionState(specs, env);
   const secrets: Record<string, ResolvedConnection> = {};
 
@@ -66,7 +82,6 @@ export async function buildConnectionRuntime(args: {
   const nangoSecretKey = typeof env.NANGO_SECRET_KEY === 'string' ? env.NANGO_SECRET_KEY : '';
   const nangoIntegrationKeys = parseNangoIntegrationKeys(env.NANGO_INTEGRATION_KEYS);
   const canRequestConnect = !!db && !!nangoSecretKey;
-  const available = canRequestConnect ? await enabledIntegrations(nangoSecretKey, args.listIntegrationsImpl ?? listIntegrations) : [];
   const nangoTools =
     canRequestConnect && db
       ? [
@@ -93,4 +108,16 @@ export async function buildConnectionRuntime(args: {
     canRequestConnections: canRequestConnect,
     providerCatalog: PROVIDER_CATALOG,
   };
+}
+
+/** Async convenience for non-render callers and broker tests. */
+export async function buildConnectionRuntime(args: {
+  db: D1Like | undefined;
+  binding: Binding;
+  env: Record<string, unknown>;
+  projectId: string;
+  listIntegrationsImpl?: typeof listIntegrations;
+  postConnectionLink?: (input: { conversationId: string; text: string }) => Promise<boolean>;
+}): Promise<ConnectionRuntime> {
+  return connectionRuntimeFromSnapshot({ ...args, snapshot: await loadConnectionSnapshot(args) });
 }

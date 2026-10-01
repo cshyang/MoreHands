@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import {
   MODEL_WORK_ITEM_STATUSES,
@@ -15,13 +15,13 @@ export function workbenchTools(db: D1Like, projectId: string, deps: ClockAndIds 
     name: 'create_work_item',
     description:
       'Record a durable project work item or child task in the MoreHands workbench. Use this for todo items, decomposition, and task tracking.',
-    parameters: Type.Object({
-      title: Type.String({ description: 'Short task title.' }),
-      body: Type.Optional(Type.String({ description: 'Optional task detail, acceptance notes, or current context.' })),
-      parentId: Type.Optional(Type.String({ description: 'Optional parent work item id in this same project.' })),
-      priority: Type.Optional(Type.Number({ description: 'Optional priority; higher numbers sort earlier in future UI.' })),
+    input: v.object({
+      title: v.pipe(v.string(), v.description('Short task title.')),
+      body: v.optional(v.pipe(v.string(), v.description('Optional task detail, acceptance notes, or current context.'))),
+      parentId: v.optional(v.pipe(v.string(), v.description('Optional parent work item id in this same project.'))),
+      priority: v.optional(v.pipe(v.number(), v.description('Optional priority; higher numbers sort earlier in future UI.'))),
     }),
-    async execute({ title, body, parentId, priority }) {
+    async run({ data: { title, body, parentId, priority } }) {
       const { item } = await createWorkItem(
         db,
         {
@@ -43,11 +43,11 @@ export function workbenchTools(db: D1Like, projectId: string, deps: ClockAndIds 
   const list = defineTool({
     name: 'list_work_items',
     description: 'List durable project work items from the MoreHands workbench, optionally filtered by status.',
-    parameters: Type.Object({
-      status: Type.Optional(Type.String({ description: 'Optional status filter, e.g. requested, running, blocked, completed.' })),
-      limit: Type.Optional(Type.Number({ description: 'Maximum rows to return; defaults to 25.' })),
+    input: v.object({
+      status: v.optional(v.pipe(v.string(), v.description('Optional status filter, e.g. requested, running, blocked, completed.'))),
+      limit: v.optional(v.pipe(v.number(), v.description('Maximum rows to return; defaults to 25.'))),
     }),
-    async execute({ status, limit }) {
+    async run({ data: { status, limit } }) {
       const items = await listWorkItems(db, projectId, {
         status: status == null ? null : String(status),
         limit: limit == null ? null : Number(limit),
@@ -59,8 +59,8 @@ export function workbenchTools(db: D1Like, projectId: string, deps: ClockAndIds 
   const get = defineTool({
     name: 'get_work_item',
     description: 'Read one durable project work item by id before acting on it or updating its progress.',
-    parameters: Type.Object({ id: Type.String({ description: 'Work item id.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.string(), v.description('Work item id.')) }),
+    async run({ data: { id } }) {
       const item = await getWorkItem(db, projectId, String(id));
       if (!item) throw new Error('work item not found');
       return JSON.stringify(item, null, 2);
@@ -71,12 +71,12 @@ export function workbenchTools(db: D1Like, projectId: string, deps: ClockAndIds 
     name: 'update_work_item',
     description:
       'Update progress on one of this project\'s work items. Allowed status values: running, waiting_approval, blocked, completed, failed.',
-    parameters: Type.Object({
-      id: Type.String({ description: 'Work item id.' }),
-      status: Type.Optional(Type.String({ description: 'Allowed: running, waiting_approval, blocked, completed, failed.' })),
-      statusNote: Type.Optional(Type.String({ description: 'Short note explaining the current progress or blocker.' })),
+    input: v.object({
+      id: v.pipe(v.string(), v.description('Work item id.')),
+      status: v.optional(v.pipe(v.string(), v.description('Allowed: running, waiting_approval, blocked, completed, failed.'))),
+      statusNote: v.optional(v.pipe(v.string(), v.description('Short note explaining the current progress or blocker.'))),
     }),
-    async execute({ id, status, statusNote }) {
+    async run({ data: { id, status, statusNote } }) {
       if (!status && statusNote == null) throw new Error('status or statusNote is required');
       const item = await getWorkItem(db, projectId, String(id));
       if (!item) throw new Error('work item not found');

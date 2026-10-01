@@ -11,15 +11,11 @@ import {
   recordSlackStreamHeartbeat,
   recordSlackToolActivity,
   renderSlackActivityReceipt,
-  reapStaleTurnActivities,
   STREAM_HEARTBEAT_MS,
   shouldPostFinalBelowActivity,
-  TURN_DIED_RESET_TEXT,
-  TURN_DIED_TEXT,
-  TURN_RETRYING_TEXT,
-  TURN_DOA_STALE_MS,
-  TURN_STALE_MS,
   toolActivityLabel,
+  withSlackActivityLock,
+  settleSlackTurnActivity,
 } from './activity';
 
 const { test, run } = createTestRunner();
@@ -28,6 +24,7 @@ type Row = Record<string, unknown>;
 
 class FakeD1 implements D1Like {
   rows: Row[] = [];
+  trackers: Row[] = [{ instance_id: 'project:P:agent:default/conv:slack:T:C:100.000', submission_id: 'native', ack_message_ts: '101.000' }];
 
   prepare(query: string) {
     const db = this;
@@ -39,10 +36,9 @@ class FakeD1 implements D1Like {
             return results[0] ?? null;
           },
           async all<T = Row>(): Promise<{ results: T[] }> {
-            if (query.includes("status='active' AND updated_at <")) {
-              const [cutoff] = values as [number];
-              // Detached copies, like real D1 — the reaper's own updates must not mutate what it read.
-              return { results: db.rows.filter((row) => row.status === 'active' && (row.updated_at as number) < cutoff).map((row) => ({ ...row })) as T[] };
+            if (query.includes('FROM slack_reply_trackers')) {
+              const [instanceId, submissionId] = values;
+              return { results: db.trackers.filter((row) => row.instance_id === instanceId && row.submission_id === submissionId && row.ack_message_ts) as T[] };
             }
             if (query.includes('FROM slack_turn_activity')) {
               const [projectId, sessionId] = values;
@@ -103,43 +99,24 @@ class FakeD1 implements D1Like {
               }
               return { meta: { changes: 1 } };
             }
-            if (query.includes("SET status='failed', completed_at=")) {
-              const [completedAt, updatedAt, doaInc, projectId, sessionId] = values;
-              const row = db.rows.find((item) => item.project_id === projectId && item.session_id === sessionId && item.status === 'active');
-              if (!row) return { meta: { changes: 0 } };
-              Object.assign(row, {
-                status: 'failed',
-                completed_at: completedAt,
-                updated_at: updatedAt,
-                doa_count: ((row.doa_count as number) ?? 0) + (doaInc as number),
-              });
-              return { meta: { changes: 1 } };
-            }
-            if (query.includes('SET doa_count=0')) {
-              const [projectId, sessionId] = values;
-              const row = db.rows.find((item) => item.project_id === projectId && item.session_id === sessionId);
-              if (!row || (query.includes('doa_count>0') && !((row.doa_count as number) > 0))) return { meta: { changes: 0 } };
-              row.doa_count = 0;
-              return { meta: { changes: 1 } };
-            }
             if (query.includes('SET updated_at=? WHERE') && query.includes("status='active' AND updated_at <=")) {
               // Stream heartbeat: throttled, no-rewind bump of updated_at only (atomic WHERE clause).
-              const [now, projectId, sessionId, threshold] = values as [number, string, string, number];
+              const [now, projectId, sessionId, threshold, expectedAck] = values as [number, string, string, number, string | null];
               const row = db.rows.find(
                 (item) =>
                   item.project_id === projectId &&
                   item.session_id === sessionId &&
                   item.status === 'active' &&
-                  (item.updated_at as number) <= threshold,
+                  (item.updated_at as number) <= threshold && (!expectedAck || item.ack_message_ts === expectedAck),
               );
               if (!row) return { meta: { changes: 0 } };
               row.updated_at = now;
               return { meta: { changes: 1 } };
             }
             if (query.startsWith('UPDATE slack_turn_activity')) {
-              const [status, activitiesJson, lastPostedAt, updatedAt, completedAt, projectId, sessionId] = values;
+              const [status, activitiesJson, lastPostedAt, updatedAt, completedAt, projectId, sessionId, expectedAck] = values;
               const row = db.rows.find((item) => item.project_id === projectId && item.session_id === sessionId);
-              if (!row) return { meta: { changes: 0 } };
+              if (!row || row.status !== 'active' || row.ack_message_ts !== expectedAck) return { meta: { changes: 0 } };
               Object.assign(row, {
                 status,
                 activities_json: activitiesJson,
@@ -351,7 +328,7 @@ test('Flue observer edits the ack with friendly labels for known tool starts', a
   const restore = installFetchCapture(calls);
   try {
     await handleObservedSlackActivity(
-      { type: 'tool_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', session: 'default', toolName: 'execute_code', toolCallId: 'tc1' } as never,
+      { type: 'tool_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native', session: 'default', toolName: 'execute_code', toolCallId: 'tc1' } as never,
       { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'xoxb-test' } } as never,
     );
   } finally {
@@ -372,15 +349,15 @@ test('Flue observer shows stream-response phase only after visible work exists',
   const restore = installFetchCapture(calls);
   try {
     await handleObservedSlackActivity(
-      { type: 'message_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', session: 'default' } as never,
+      { type: 'message_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native', session: 'default', message: { role: 'assistant' } } as never,
       { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'xoxb-test' } } as never,
     );
     await handleObservedSlackActivity(
-      { type: 'tool_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', session: 'default', toolName: 'execute_code', toolCallId: 'tc1' } as never,
+      { type: 'tool_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native', session: 'default', toolName: 'execute_code', toolCallId: 'tc1' } as never,
       { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'xoxb-test' } } as never,
     );
     await handleObservedSlackActivity(
-      { type: 'message_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', session: 'default' } as never,
+      { type: 'message_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native', session: 'default', message: { role: 'assistant' } } as never,
       { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'xoxb-test' } } as never,
     );
   } finally {
@@ -402,7 +379,7 @@ test('Flue observer hides unknown tools and never posts args or results', async 
     await handleObservedSlackActivity(
       {
         type: 'tool_start',
-        instanceId: 'project:P:agent:default/conv:slack:T:C:100.000',
+        instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native',
         session: 'default',
         toolName: 'secret_debug_tool',
         toolCallId: 'tc1',
@@ -413,7 +390,7 @@ test('Flue observer hides unknown tools and never posts args or results', async 
     await handleObservedSlackActivity(
       {
         type: 'tool',
-        instanceId: 'project:P:agent:default/conv:slack:T:C:100.000',
+        instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native',
         session: 'default',
         toolName: 'execute_code',
         toolCallId: 'tc2',
@@ -433,142 +410,6 @@ test('Flue observer hides unknown tools and never posts args or results', async 
   assert.doesNotMatch(String(calls[0].body.text), /secret_debug_tool/);
   assert.doesNotMatch(String(calls[0].body.text), /secret-token/);
   assert.doesNotMatch(String(calls[0].body.text), /secret stack trace/);
-});
-
-test('reapStaleTurnActivities: marks long-stale active turns failed and edits the receipt', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  const edits: Array<{ token: string; channel: string; ts: string; text: string }> = [];
-  const logs: string[] = [];
-  const reaped = await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'xoxb-1' }, {
-    now: TURN_STALE_MS + 1000,
-    editMessage: async (token, channel, ts, text) => { edits.push({ token, channel, ts, text }); },
-    log: (m) => logs.push(m),
-  });
-  assert.equal(reaped, 1);
-  const activity = await loadSlackTurnActivity(db, 'P', 'conv:slack:T:C:100.000');
-  assert.equal(activity?.status, 'failed');
-  assert.equal(edits[0].text, TURN_DIED_TEXT);
-  assert.equal(edits[0].ts, '101.000');
-});
-
-test('reapStaleTurnActivities: leaves fresh and completed turns alone; edit failure still reaps', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 1000 }));
-  assert.equal(await reapStaleTurnActivities(db, {}, { now: 2000, editMessage: async () => {} }), 0, 'fresh turn untouched');
-
-  const reaped = await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'xoxb-1' }, {
-    now: TURN_STALE_MS + 5000,
-    editMessage: async () => { throw new Error('slack down'); },
-    log: () => {},
-  });
-  assert.equal(reaped, 1, 'edit failure does not block the reap');
-  assert.equal((await loadSlackTurnActivity(db, 'P', 'conv:slack:T:C:100.000'))?.status, 'failed');
-  assert.equal(await reapStaleTurnActivities(db, {}, { now: TURN_STALE_MS + 9000, editMessage: async () => {} }), 0, 'already-failed row not re-reaped');
-});
-
-test('reaper two-tier: zero-beat turn reaps at the DOA window; mid-flight turn waits for the long one', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  await createSlackTurnActivity(db, input({ now: 0, sessionId: 'conv:slack:T:C:200.000', conversationId: 'slack:T:C:200.000', ackMessageTs: '201.000' }));
-  await recordSlackToolActivity(db, { projectId: 'P', sessionId: 'conv:slack:T:C:200.000', toolName: 'execute_code', now: 1000 });
-
-  const edits: Array<{ text: string }> = [];
-  const reaped = await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'xoxb-1' }, {
-    now: TURN_DOA_STALE_MS + 5000, // past the DOA window, well inside the 10-min one
-    editMessage: async (_t, _c, _ts, text) => { edits.push({ text }); },
-    log: () => {},
-  });
-  assert.equal(reaped, 1, 'only the zero-beat turn reaps early');
-  assert.equal((await loadSlackTurnActivity(db, 'P', 'conv:slack:T:C:100.000'))?.status, 'failed');
-  assert.equal((await loadSlackTurnActivity(db, 'P', 'conv:slack:T:C:200.000'))?.status, 'active', 'turn with beats survives the DOA window');
-  assert.equal(edits[0].text, TURN_DIED_TEXT);
-});
-
-test('reaper self-heal: second consecutive DOA bumps the session epoch and says so', async () => {
-  const db = new FakeD1();
-  const bumps: string[] = [];
-  const edits: string[] = [];
-  const deps = {
-    editMessage: async (_t: string, _c: string, _ts: string, text: string) => { edits.push(text); },
-    bumpEpoch: async (projectId: string, conversationId: string) => { bumps.push(`${projectId}/${conversationId}`); return bumps.length; },
-    log: () => {},
-  };
-
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, { ...deps, now: TURN_DOA_STALE_MS + 1000 });
-  assert.equal(bumps.length, 0, 'first DOA is treated as a transient flake');
-  assert.equal(edits[0], TURN_DIED_TEXT);
-
-  // The user retries; the turn dies on arrival again.
-  await createSlackTurnActivity(db, input({ now: TURN_DOA_STALE_MS + 60_000, ackMessageTs: '102.000' }));
-  await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, { ...deps, now: 2 * TURN_DOA_STALE_MS + 120_000 });
-  assert.deepEqual(bumps, ['P/slack:T:C:100.000'], 'second consecutive DOA declares the session wedged');
-  assert.equal(edits[1], TURN_DIED_RESET_TEXT);
-  assert.equal((await loadSlackTurnActivity(db, 'P', 'conv:slack:T:C:100.000'))?.status, 'failed');
-});
-
-test('reaper auto-retry: first-strike DOA re-dispatches and shows the retrying note', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  const retries: string[] = [];
-  const edits: string[] = [];
-  const reaped = await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, {
-    now: TURN_DOA_STALE_MS + 1000,
-    editMessage: async (_t, _c, _ts, text) => { edits.push(text); },
-    retryTurn: async (row) => { retries.push(row.conversationId); return true; },
-    bumpEpoch: async () => { throw new Error('must not bump on strike one'); },
-    log: () => {},
-  });
-  assert.equal(reaped, 1);
-  assert.deepEqual(retries, ['slack:T:C:100.000']);
-  assert.deepEqual(edits, [TURN_RETRYING_TEXT], 'retrying note instead of a death notice');
-});
-
-test('reaper auto-retry: retry dispatch failure falls back to the death notice', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  const edits: string[] = [];
-  await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, {
-    now: TURN_DOA_STALE_MS + 1000,
-    editMessage: async (_t, _c, _ts, text) => { edits.push(text); },
-    retryTurn: async () => { throw new Error('dispatch down'); },
-    log: () => {},
-  });
-  assert.deepEqual(edits, [TURN_DIED_TEXT]);
-});
-
-test('reaper auto-retry: second strike skips retry and resets the session', async () => {
-  const db = new FakeD1();
-  const retries: string[] = [];
-  const bumps: string[] = [];
-  const edits: string[] = [];
-  const deps = {
-    editMessage: async (_t: string, _c: string, _ts: string, text: string) => { edits.push(text); },
-    retryTurn: async (row: { conversationId: string }) => { retries.push(row.conversationId); return true; },
-    bumpEpoch: async (p: string, c: string) => { bumps.push(`${p}/${c}`); return 1; },
-    log: () => {},
-  };
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, { ...deps, now: TURN_DOA_STALE_MS + 1000 });
-  assert.equal(retries.length, 1, 'strike one retries');
-  // The retried turn ALSO dies on arrival.
-  await createSlackTurnActivity(db, input({ now: TURN_DOA_STALE_MS + 60_000, ackMessageTs: '102.000' }));
-  await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, { ...deps, now: 2 * TURN_DOA_STALE_MS + 120_000 });
-  assert.equal(retries.length, 1, 'strike two does NOT retry again');
-  assert.deepEqual(bumps, ['P/slack:T:C:100.000'], 'strike two resets the session');
-  assert.equal(edits[1], TURN_DIED_RESET_TEXT);
-});
-
-test('completed turn resets the DOA streak', async () => {
-  const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  await reapStaleTurnActivities(db, {}, { now: TURN_DOA_STALE_MS + 1000, editMessage: async () => {}, log: () => {} });
-  // Retry succeeds this time.
-  await createSlackTurnActivity(db, input({ now: TURN_DOA_STALE_MS + 60_000, ackMessageTs: '102.000' }));
-  await completeSlackTurnActivity(db, 'P', 'conv:slack:T:C:100.000', 'completed', TURN_DOA_STALE_MS + 90_000);
-  const row = db.rows.find((r) => r.session_id === 'conv:slack:T:C:100.000');
-  assert.equal(row?.doa_count, 0, 'success clears the wedge counter');
 });
 
 // ── stream heartbeat (token-level proof of life) ──────────────────────────────
@@ -606,20 +447,107 @@ test('stream heartbeat: never revives a completed or failed turn', async () => {
   assert.equal(activity?.updatedAt, 2000, 'a stray late delta cannot bump a finished turn');
 });
 
-test('stream heartbeat: a fresh delta keeps a turn the reaper would otherwise lose, and reaping still works once tokens stop', async () => {
+test('user message_start never claims the model is responding', async () => {
   const db = new FakeD1();
-  await createSlackTurnActivity(db, input({ now: 0 }));
-  // Last tool beat was early; without a heartbeat this clock would be long stale.
-  await recordSlackToolActivity(db, { projectId: 'P', sessionId: 'conv:slack:T:C:100.000', toolName: 'execute_code', now: 1000 });
-  const streamingNow = TURN_STALE_MS + 60_000;
-  await recordSlackStreamHeartbeat(db, { projectId: 'P', sessionId: 'conv:slack:T:C:100.000', now: streamingNow });
+  await createSlackTurnActivity(db, input());
+  await recordSlackToolActivity(db, { projectId: 'P', sessionId: input().sessionId, toolName: 'execute_code' });
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const restore = installFetchCapture(calls);
+  try {
+    await handleObservedSlackActivity(
+      { type: 'message_start', instanceId: 'project:P:agent:default/conv:slack:T:C:100.000', submissionId: 'native', message: { role: 'user' } } as never,
+      { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'x' } } as never,
+    );
+  } finally {
+    restore();
+  }
+  assert.equal(calls.length, 0);
+});
 
-  const reaped = await reapStaleTurnActivities(db, {}, { now: streamingNow + 1000, editMessage: async () => {}, log: () => {} });
-  assert.equal(reaped, 0, 'a turn still emitting tokens is not reaped, even long after its last tool beat');
+test('activity lock drains an earlier receipt before a final answer and ignores later activity', async () => {
+  const db = new FakeD1();
+  await createSlackTurnActivity(db, input());
+  const order: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const receipt = withSlackActivityLock(db, 'P', input().sessionId, async () => {
+    order.push('receipt-start');
+    await gate;
+    order.push('receipt-end');
+  });
+  const final = withSlackActivityLock(db, 'P', input().sessionId, async () => {
+    await completeSlackTurnActivity(db, 'P', input().sessionId);
+    order.push('final');
+  });
+  release();
+  await Promise.all([receipt, final]);
+  assert.deepEqual(order, ['receipt-start', 'receipt-end', 'final']);
+  assert.equal(await recordSlackToolActivity(db, { projectId: 'P', sessionId: input().sessionId, toolName: 'execute_code' }), null);
+});
 
-  // Tokens stop — once the clock goes stale again, the reaper claims it as before.
-  const reapedLater = await reapStaleTurnActivities(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, { now: streamingNow + TURN_STALE_MS + 1000, editMessage: async () => {}, log: () => {} });
-  assert.equal(reapedLater, 1, 'once the deltas stop the stale turn is reaped — the heartbeat shifts the deadline, it does not remove it');
+test('old native settlement cannot clear or edit a newer receipt in the same conversation', async () => {
+  const db = new FakeD1();
+  await createSlackTurnActivity(db, input());
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const restore = installFetchCapture(calls);
+  try {
+    await settleSlackTurnActivity(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, {
+      projectId: 'P', conversationId: input().conversationId, ackMessageTs: 'old-ack', outcome: 'failed',
+    });
+  } finally { restore(); }
+  assert.equal((await loadSlackTurnActivity(db, 'P', input().sessionId))?.status, 'active');
+  assert.equal(calls.length, 0);
+});
+
+test('native failure settles only its receipt with a visible safe terminal message', async () => {
+  const db = new FakeD1();
+  await createSlackTurnActivity(db, input());
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const restore = installFetchCapture(calls);
+  try {
+    await settleSlackTurnActivity(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, {
+      projectId: 'P', conversationId: input().conversationId, ackMessageTs: input().ackMessageTs, outcome: 'failed',
+    });
+  } finally { restore(); }
+  assert.equal((await loadSlackTurnActivity(db, 'P', input().sessionId))?.status, 'failed');
+  assert.equal(calls.length, 1);
+  assert.match(String(calls[0].body.text), /could not finish/);
+});
+
+test('delivered completion renders receipt chrome and retries an interrupted edit', async () => {
+  const db = new FakeD1();
+  await createSlackTurnActivity(db, input());
+  const args = { projectId: 'P', conversationId: input().conversationId, ackMessageTs: input().ackMessageTs, outcome: 'completed' as const };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error('connection lost'); }) as typeof fetch;
+  try {
+    await assert.rejects(settleSlackTurnActivity(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, args), /connection lost/);
+  } finally { globalThis.fetch = originalFetch; }
+  assert.equal((await loadSlackTurnActivity(db, 'P', input().sessionId))?.status, 'completed');
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const restore = installFetchCapture(calls);
+  try { await settleSlackTurnActivity(db, { SLACK_BOT_TOKEN_DEFAULT: 'x' }, args); } finally { restore(); }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.ts, input().ackMessageTs);
+  assert.equal(String(calls[0].body.text), renderSlackActivityReceipt((await loadSlackTurnActivity(db, 'P', input().sessionId))!));
+});
+
+test('native progress is keyed to the submission receipt, not the current conversation alone', async () => {
+  const db = new FakeD1();
+  await createSlackTurnActivity(db, input());
+  const instanceId = 'project:P:agent:default/conv:slack:T:C:100.000';
+  db.trackers.push({ instance_id: instanceId, submission_id: 'old', ack_message_ts: 'old-ack' });
+  db.trackers.push({ instance_id: instanceId, submission_id: 'current', ack_message_ts: input().ackMessageTs });
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const restore = installFetchCapture(calls);
+  try {
+    for (const submissionId of [undefined, 'old', 'missing', 'current']) await handleObservedSlackActivity(
+      { type: 'tool_start', instanceId, submissionId, toolName: 'execute_code' } as never,
+      { env: { DB: db, SLACK_BOT_TOKEN_DEFAULT: 'x' } } as never,
+    );
+  } finally { restore(); }
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.ts, input().ackMessageTs);
 });
 
 await run();

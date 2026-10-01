@@ -20,7 +20,7 @@
 // scanning (the real defense is the framing in renderMemory + tool-bound FUNCTION).
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 
 // Budget counts RENDERED size (fact + the `[id] ` prefix + a newline), not raw fact text, so
@@ -63,10 +63,10 @@ export function memoryTools(db: D1Like, projectId: string): ToolDefinition[] {
       'truth worth keeping. Save ONE compact declarative fact ("Alex is the designer; prefers Figma"), ' +
       'not commands to yourself and not temporary task progress (rely on the current thread for that). ' +
       'These facts are shared channel knowledge, injected into every future turn.',
-    parameters: Type.Object({
-      fact: Type.String({ description: 'One compact declarative fact to remember.' }),
+    input: v.object({
+      fact: v.pipe(v.string(), v.description('One compact declarative fact to remember.')),
     }),
-    async execute({ fact }) {
+    async run({ data: { fact } }) {
       const f = String(fact).trim();
       if (!f) throw new Error('fact cannot be empty.');
       if (f.length > PER_ENTRY_MAX) {
@@ -98,11 +98,11 @@ export function memoryTools(db: D1Like, projectId: string): ToolDefinition[] {
     description:
       'Revise a fact you already saved, by its id (the [id] shown in your memory block). Use this ' +
       'when a fact changed rather than saving a near-duplicate.',
-    parameters: Type.Object({
-      id: Type.Integer({ description: 'The [id] of the memory to revise.' }),
-      fact: Type.String({ description: 'The corrected fact (replaces the old text).' }),
+    input: v.object({
+      id: v.pipe(v.number(), v.integer(), v.description('The [id] of the memory to revise.')),
+      fact: v.pipe(v.string(), v.description('The corrected fact (replaces the old text).')),
     }),
-    async execute({ id, fact }) {
+    async run({ data: { id, fact } }) {
       const f = String(fact).trim();
       if (!f) throw new Error('fact cannot be empty; use forget_memory to delete.');
       if (f.length > PER_ENTRY_MAX) {
@@ -128,8 +128,8 @@ export function memoryTools(db: D1Like, projectId: string): ToolDefinition[] {
   const forgetMemory = defineTool({
     name: 'forget_memory',
     description: 'Delete a saved fact by its id (the [id] shown in your memory block) when it is stale or wrong.',
-    parameters: Type.Object({ id: Type.Integer({ description: 'The [id] of the memory to delete.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.number(), v.integer(), v.description('The [id] of the memory to delete.')) }),
+    async run({ data: { id } }) {
       await db.prepare('DELETE FROM memories WHERE project_id=? AND id=?').bind(projectId, id).run();
       return `Forgot memory [${id}].`;
     },

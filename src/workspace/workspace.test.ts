@@ -1,7 +1,7 @@
 // Coordinator workspace sandbox-tool invariants — run: npx tsx src/workspace/workspace.test.ts
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import {
   hasWorkspaceCapability,
@@ -289,13 +289,13 @@ test('listWorkspaceOps: project-scoped, newest first', async () => {
   assert.equal(audits[1].detailPreview, 'first');
 });
 
-test('workspace_exec tool: end-to-end through defineTool execute returns JSON', async () => {
+test('workspace_exec tool: end-to-end through defineTool run returns JSON', async () => {
   const db = new FakeD1();
   const sandbox = new FakeSandbox();
   sandbox.execResult = { success: true, exitCode: 0, stdout: 'tool ok', stderr: '' };
   const tools = workspaceTools({ db, sandbox: () => sandbox, projectId: 'proj-1' });
   const exec = tools.find((tool) => tool.name === 'workspace_exec')!;
-  const raw = await exec.execute({ command: 'echo tool ok' }, new AbortController().signal);
+  const raw = await invokeTool(exec, { command: 'echo tool ok' }, new AbortController().signal);
   const parsed = JSON.parse(String(raw));
   assert.equal(parsed.status, 'completed');
   assert.equal(parsed.stdout, 'tool ok');

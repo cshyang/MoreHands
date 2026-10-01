@@ -7,7 +7,7 @@
 // person is looked up at most once (until the TTL), and only for people the agent actually asks about.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import { fetchWithTimeout } from '../providers/http';
 import type { D1Like } from '../skills/repository';
 
@@ -130,10 +130,10 @@ export function userTools(db: D1Like | undefined, token: string | undefined): To
       'dispatch input (e.g. "slack:T123:U456") or a bare id like "U456". Use this when you need to ' +
       'address someone by name or attribute who said something. Results are cached, so calling it ' +
       'repeatedly for the same person is cheap.',
-    parameters: Type.Object({
-      user: Type.String({ description: 'The senderId ("slack:<team>:<user>") or a bare Slack user id ("U…").' }),
+    input: v.object({
+      user: v.pipe(v.string(), v.description('The senderId ("slack:<team>:<user>") or a bare Slack user id ("U…").')),
     }),
-    async execute({ user }) {
+    async run({ data: { user } }) {
       const id = String(user);
       const name = await resolveUserName(db, token, id).catch((e) => {
         throw new Error(`Couldn't resolve ${id}: ${(e as Error).message}`);

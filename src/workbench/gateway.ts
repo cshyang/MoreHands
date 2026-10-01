@@ -2,6 +2,7 @@ import type { D1Like } from '../skills/repository';
 import type { Binding } from '../project/bindings';
 import { agentInstanceId } from '../project/bindings';
 import { hasMatchingSecretHeader } from '../gateway/auth';
+import type { ProjectDispatchRequest } from '../gateway/dispatch';
 import {
   WORK_ITEM_SOURCE_TYPES,
   createWorkItem,
@@ -12,11 +13,7 @@ import {
   type WorkItem,
 } from './repository';
 
-export interface DispatchRequest {
-  agent: string;
-  id: string;
-  input: Record<string, unknown>;
-}
+export type DispatchRequest = ProjectDispatchRequest;
 
 export interface InternalWorkItemRouteResult {
   status: number;
@@ -125,6 +122,7 @@ export async function handleInternalWorkItemRequest(
   const dispatchInput: DispatchRequest = {
     agent: 'project',
     id: agentInstanceId(created.item.projectId, `work:${created.item.id}`),
+    idempotencyKey: `work:${run.id}`,
     input: {
       kind: 'work_item',
       workItemId: created.item.id,

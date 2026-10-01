@@ -65,4 +65,18 @@ test('prompt explains coordinator code mode and its limits', async () => {
   assert.match(prompt, /not source-code editing/i);
 });
 
+test('engaged replies end in plain final text, not the old mandatory reply tool', () => {
+  const prompt = buildInstructions({ projectName: 'project_1', personality: null, catalog: [], engaged: true });
+  assert.match(prompt, /complete plain final answer/);
+  assert.match(prompt, /reply_to_conversation is unavailable/);
+  assert.doesNotMatch(prompt, /FINAL action is ALWAYS|silently DISCARDED|End every turn by calling/);
+});
+
+test('autonomous no-op turns stay quiet and intentional posts retain their tool', () => {
+  const prompt = buildInstructions({ projectName: 'project_1', personality: null, catalog: [], engaged: false });
+  assert.match(prompt, /This is autonomous work/);
+  assert.match(prompt, /Otherwise stay quiet/);
+  assert.match(prompt, /through reply_to_conversation/);
+});
+
 await run();

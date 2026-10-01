@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import { hasMatchingSecretHeader } from '../gateway/auth';
 import { fetchWithTimeout, jsonMessageOrText } from '../providers/http';
 import type { D1Like } from '../skills/repository';
@@ -243,17 +243,17 @@ export function sourceChangeTools(args: SourceChangeToolArgs): ToolDefinition[] 
       'Create a structured MoreHands workbench item for a proposed source-code change to MoreHands itself. ' +
       'Use this when the agent notices a code-level improvement, bug, missing tool, or runtime limitation. ' +
       'This does NOT edit code, create a GitHub issue, merge, or deploy.',
-    parameters: Type.Object({
-      targetRepo: Type.String({ description: 'Repository to change, e.g. github.com/org/repo. Required; do not guess.' }),
-      problem: Type.String({ description: 'The problem or limitation observed.' }),
-      evidence: Type.Array(Type.String({ description: 'Concrete observations or user requests supporting the change.' })),
-      desiredBehavior: Type.String({ description: 'What should work after the change.' }),
-      acceptanceTests: Type.Array(Type.String({ description: 'Tests or checks that prove the change worked.' })),
-      risk: Type.String({ description: 'Risk level: low, medium, or high.' }),
-      likelyFiles: Type.Optional(Type.Array(Type.String({ description: 'Likely repo files to inspect or change.' }))),
-      baseBranch: Type.Optional(Type.String({ description: 'Base branch for the runner; defaults to main.' })),
+    input: v.object({
+      targetRepo: v.pipe(v.string(), v.description('Repository to change, e.g. github.com/org/repo. Required; do not guess.')),
+      problem: v.pipe(v.string(), v.description('The problem or limitation observed.')),
+      evidence: v.array(v.pipe(v.string(), v.description('Concrete observations or user requests supporting the change.'))),
+      desiredBehavior: v.pipe(v.string(), v.description('What should work after the change.')),
+      acceptanceTests: v.array(v.pipe(v.string(), v.description('Tests or checks that prove the change worked.'))),
+      risk: v.pipe(v.string(), v.description('Risk level: low, medium, or high.')),
+      likelyFiles: v.optional(v.array(v.pipe(v.string(), v.description('Likely repo files to inspect or change.')))),
+      baseBranch: v.optional(v.pipe(v.string(), v.description('Base branch for the runner; defaults to main.'))),
     }),
-    async execute(input) {
+    async run({ data: input }) {
       const created = await proposeSourceChange(args.db, args.projectId, input, args.deps);
       return JSON.stringify(created.item, null, 2);
     },
@@ -267,10 +267,10 @@ export function sourceChangeTools(args: SourceChangeToolArgs): ToolDefinition[] 
     description:
       'Dispatch a source-change work item to the configured generic coding runner. The runner owns clone/edit/test/commit/PR. ' +
       'This tool only records the run and sends the structured request; it cannot merge or deploy.',
-    parameters: Type.Object({
-      workItemId: Type.String({ description: 'The source-change work item id returned by propose_self_change.' }),
+    input: v.object({
+      workItemId: v.pipe(v.string(), v.description('The source-change work item id returned by propose_self_change.')),
     }),
-    async execute({ workItemId }) {
+    async run({ data: { workItemId } }) {
       const result = await dispatchSourceChangeRun(args.db, args.projectId, String(workItemId), {
         runnerUrl: args.runnerUrl as string,
         runnerToken: args.runnerToken as string,

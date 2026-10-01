@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { Binding } from '../project/bindings';
 import type { D1Like } from '../skills/repository';
 import { connectionState, loadConnectionSpecs } from '../connections/repository';
@@ -192,12 +192,12 @@ export function setupStatusTool(args: {
     name: 'setup_status',
     description:
       'Return a secret-free setup checklist for this Slack project: connected providers, missing providers, route readiness, runner readiness, and the next action.',
-    parameters: Type.Object({
-      targetRepo: Type.Optional(Type.String({ description: 'Optional GitHub owner/name repo the person wants to use.' })),
-      linearTeamKey: Type.Optional(Type.String({ description: 'Optional Linear team key/id, for example EDK.' })),
-      intent: Type.Optional(Type.String({ description: 'Optional setup intent, for example run_agent.' })),
+    input: v.object({
+      targetRepo: v.optional(v.pipe(v.string(), v.description('Optional GitHub owner/name repo the person wants to use.'))),
+      linearTeamKey: v.optional(v.pipe(v.string(), v.description('Optional Linear team key/id, for example EDK.'))),
+      intent: v.optional(v.pipe(v.string(), v.description('Optional setup intent, for example run_agent.'))),
     }),
-    async execute({ targetRepo, linearTeamKey, intent }) {
+    async run({ data: { targetRepo, linearTeamKey, intent } }) {
       const status = await buildSetupStatus({
         db: args.db,
         binding: args.binding,

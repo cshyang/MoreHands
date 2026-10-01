@@ -64,14 +64,10 @@ export async function upsertConversationTarget(db: D1Like, input: UpsertConversa
 }
 
 // ── Session epoch (wedged-thread cure) ──────────────────────────────────────────────────────────
-// A conversation's Flue session lives in a DO whose instance-id scope WE construct. The epoch
-// versions that scope: bumping it abandons a poisoned session (a mid-stream death can corrupt the
-// DO-internal history so every later model request dies before its first token) and the next turn
-// starts fresh, rehydrated from D1 + backscroll. Bumped automatically by the dead-turn reaper
-// after two consecutive dead-on-arrival turns, or manually via /__admin/conversations/reset.
+// An operator can bump this scope via /__admin/conversations/reset to start a fresh native
+// conversation, rehydrated from D1 + Slack backscroll. Native durability owns automatic retries.
 
-/** The DO scope for a conversation at an epoch. Epoch 0 keeps the legacy shape so existing
- *  healthy sessions survive the rollout untouched. */
+/** Operator reset version within the current native instance generation. */
 export function conversationScope(conversationId: string, epoch: number): string {
   return epoch > 0 ? `conv:${conversationId}~e${epoch}` : `conv:${conversationId}`;
 }

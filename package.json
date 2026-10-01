@@ -7,36 +7,36 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "tsx src/shared/stream-journal.test.ts && tsx src/shared/patch-guard.test.ts && tsx src/shared/wall-clock.test.ts && tsx src/code-mode/code-mode.test.ts && tsx src/workspace/workspace.test.ts && tsx src/workspace/slack-files.test.ts && tsx src/agent/self.test.ts && tsx src/agent/prompt.test.ts && tsx src/config/deployment.test.ts && tsx src/agent-runs/agent-kits.test.ts && tsx src/agent-runs/events.test.ts && tsx src/agent-runs/agent-runs.test.ts && tsx src/agent-runs/linear.test.ts && tsx src/agent-runs/linear-reply.test.ts && tsx src/agent-runs/provider-events.test.ts && tsx src/agent-runs/continuation.test.ts && tsx src/agent-runs/notifications.test.ts && tsx src/agent-runs/runner-contract.test.ts && tsx src/setup/status.test.ts && tsx src/knowledge/memory.test.ts && tsx src/knowledge/people.test.ts && tsx src/knowledge/reflection.test.ts && tsx src/review.test.ts && tsx src/skills/skills.test.ts && tsx src/project/conversations.test.ts && tsx src/connections/connections.test.ts && tsx src/connections/audit.test.ts && tsx src/connections/notices.test.ts && tsx src/project/bindings.test.ts && tsx src/project/persona.test.ts && tsx src/project/souls.test.ts && tsx src/project/overhearing.test.ts && tsx src/knowledge/users.test.ts && tsx src/providers/http.test.ts && tsx src/providers/nango.test.ts && tsx src/gateway/scheduled.test.ts && tsx src/gateway/reminders-store.test.ts && tsx src/gateway/auth.test.ts && tsx src/gateway/json.test.ts && tsx src/slack/activity.test.ts && tsx src/slack/absorb.test.ts && tsx src/slack/ack.test.ts && tsx src/slack/dispatch.test.ts && tsx src/slack/events.test.ts && tsx src/slack/format.test.ts && tsx src/slack/post.test.ts && tsx src/slack/blocks.test.ts && tsx src/slack/threads.test.ts && tsx src/slack/commands.test.ts && tsx src/knowledge/search.test.ts && tsx src/workbench/workbench.test.ts && tsx src/workbench/source-change.test.ts && tsx trigger/workspace/provider.test.ts && tsx trigger/github.test.ts && tsx trigger/run-coding-task.test.ts && tsx trigger/pi-rpc-client.test.ts",
+    "test": "tsx src/shared/wall-clock.test.ts && tsx src/code-mode/code-mode.test.ts && tsx src/workspace/workspace.test.ts && tsx src/workspace/slack-files.test.ts && tsx src/agent/self.test.ts && tsx src/agent/prompt.test.ts && tsx src/agent/context.test.ts && tsx src/agent/providers.test.ts && tsx src/slack/delivery.test.ts && tsx src/slack/reply-runtime.test.ts && tsx src/config/deployment.test.ts && tsx src/agent-runs/agent-kits.test.ts && tsx src/agent-runs/events.test.ts && tsx src/agent-runs/agent-runs.test.ts && tsx src/agent-runs/linear.test.ts && tsx src/agent-runs/linear-reply.test.ts && tsx src/agent-runs/provider-events.test.ts && tsx src/agent-runs/continuation.test.ts && tsx src/agent-runs/notifications.test.ts && tsx src/agent-runs/runner-contract.test.ts && tsx src/setup/status.test.ts && tsx src/knowledge/memory.test.ts && tsx src/knowledge/people.test.ts && tsx src/knowledge/reflection.test.ts && tsx src/review.test.ts && tsx src/skills/skills.test.ts && tsx src/project/conversations.test.ts && tsx src/connections/connections.test.ts && tsx src/connections/audit.test.ts && tsx src/connections/notices.test.ts && tsx src/project/bindings.test.ts && tsx src/project/persona.test.ts && tsx src/project/souls.test.ts && tsx src/project/overhearing.test.ts && tsx src/knowledge/users.test.ts && tsx src/providers/http.test.ts && tsx src/providers/nango.test.ts && tsx src/gateway/dispatch.test.ts && tsx src/gateway/replies.test.ts && tsx src/gateway/scheduled.test.ts && tsx src/gateway/reminders-store.test.ts && tsx src/gateway/auth.test.ts && tsx src/gateway/json.test.ts && tsx src/slack/activity.test.ts && tsx src/slack/ack.test.ts && tsx src/slack/dispatch.test.ts && tsx src/slack/events.test.ts && tsx src/slack/format.test.ts && tsx src/slack/post.test.ts && tsx src/slack/reply-outbox.test.ts && tsx src/slack/reconcile-post.test.ts && tsx src/slack/blocks.test.ts && tsx src/slack/threads.test.ts && tsx src/slack/commands.test.ts && tsx src/knowledge/search.test.ts && tsx src/workbench/workbench.test.ts && tsx src/workbench/source-change.test.ts && tsx trigger/workspace/provider.test.ts && tsx trigger/github.test.ts && tsx trigger/run-coding-task.test.ts && tsx trigger/pi-rpc-client.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "flue build --target cloudflare",
+    "dev": "vite dev",
+    "build": "vite build",
     "predeploy": "npm run typecheck && npm test && npm run build",
     "deploy": "wrangler deploy --config dist/hatchery/wrangler.json",
     "trigger:dev": "trigger dev",
-    "trigger:deploy": "trigger deploy",
-    "postinstall": "patch-package"
+    "trigger:deploy": "trigger deploy"
   },
   "keywords": [],
   "author": "cshyang <cshyang.chng@gmail.com>",
   "license": "Apache-2.0",
   "dependencies": {
     "@cloudflare/sandbox": "^0.12.1",
-    "@earendil-works/pi-ai": "^0.79.6",
-    "@flue/runtime": "1.0.0-beta.1",
-    "@flue/sdk": "1.0.0-beta.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@flue/runtime": "2.2.2",
     "@trigger.dev/sdk": "^4.4.6",
-    "agents": "^0.15.0",
     "hono": "^4.12.23",
     "valibot": "^1.4.1"
   },
   "devDependencies": {
-    "@flue/cli": "1.0.0-beta.1",
+    "@cloudflare/vite-plugin": "^1.62.2",
+    "@cloudflare/workers-types": "^5.20260930.1",
+    "@flue/vite": "2.2.2",
     "@trigger.dev/build": "^4.4.6",
-    "patch-package": "^8.0.1",
     "trigger.dev": "^4.4.6",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
-    "wrangler": "^4.99.0"
+    "vite": "^8.3.1",
+    "wrangler": "^4.144.0"
   },
   "type": "module"
 }

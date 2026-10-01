@@ -10,7 +10,7 @@
 // ~12s fetch ceiling never applies here.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { createAgentRunChannelNotifications, findActiveRouteForProject } from './events';
 import { createAgentRun, getLatestAgentRunByLinearIssue } from './repository';
@@ -42,23 +42,25 @@ export function assignCodingRunTool(args: { db: D1Like; projectId: string; now?:
       'Progress and the PR link come back to this channel as run notifications. To actively follow up (review the PR ' +
       'when it lands, chase a stuck run), set a one-shot reminder in the same turn whose prompt names this ' +
       'conversationId and the issueKey to check with check_agent_runs.',
-    parameters: Type.Object({
-      title: Type.String({ description: 'One-line imperative goal, e.g. "Fix trailing hyphens in slugify".' }),
-      description: Type.String({
-        description:
+    input: v.object({
+      title: v.pipe(v.string(), v.description('One-line imperative goal, e.g. "Fix trailing hyphens in slugify".')),
+      description: v.pipe(
+        v.string(),
+        v.description(
           'The work contract: context, concrete acceptance criteria (one per line), and the verification command. ' +
           'This is everything the coding agent gets — it has the repo but not this conversation.',
-      }),
-      identifier: Type.Optional(
-        Type.String({
-          description:
-            'Issue key, e.g. a Linear identifier like FRD-12 when this tracks a real issue. Keys the work branch ' +
-            '(harness/<identifier>) and dedupe. Omit for ad-hoc work — one is generated.',
-      }),
+        ),
       ),
-      linearUrl: Type.Optional(Type.String({ description: 'Linear issue URL when one exists, for receipts.' })),
+      identifier: v.optional(v.pipe(
+        v.string(),
+        v.description(
+          'Issue key, e.g. a Linear identifier like FRD-12 when this tracks a real issue. Keys the work branch ' +
+          '(harness/<identifier>) and dedupe. Omit for ad-hoc work — one is generated.',
+        ),
+      )),
+      linearUrl: v.optional(v.pipe(v.string(), v.description('Linear issue URL when one exists, for receipts.'))),
     }),
-    async execute({ title, description, identifier, linearUrl }) {
+    async run({ data: { title, description, identifier, linearUrl } }) {
       const route = await findActiveRouteForProject(args.db, args.projectId);
       if (!route) {
         return (

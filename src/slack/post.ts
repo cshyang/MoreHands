@@ -1,5 +1,5 @@
-// Minimal Slack chat.postMessage / chat.update wrappers. Used only by the guarded reply tool,
-// which supplies channel + token from trusted config — never from the model.
+// Minimal Slack chat.postMessage / chat.update wrappers. Callers supply channel and token
+// from trusted product routing; engaged answers use the durable outbox.
 
 import { formatSlackText } from './format';
 import type { SlackBlock } from './blocks';
@@ -19,6 +19,14 @@ export interface SlackPostOptions {
   username?: string;
   iconEmoji?: string;
   iconUrl?: string;
+  /** Durable reply-part identity, used to reconcile an uncertain post against Slack history. */
+  deliveryId?: string;
+}
+
+export class SlackApiError extends Error {
+  constructor(public readonly code: string) {
+    super(`slack API failed: ${code}`);
+  }
 }
 
 async function slackCall(method: 'chat.postMessage' | 'chat.update', token: string, body: Record<string, unknown>): Promise<SlackApiResponse> {
@@ -30,7 +38,15 @@ async function slackCall(method: 'chat.postMessage' | 'chat.update', token: stri
     },
     body: JSON.stringify(body),
   });
-  return (await res.json()) as SlackApiResponse;
+  if (res.status >= 500) throw new Error(`Slack ${method} returned HTTP ${res.status}; outcome unknown`);
+  const data: unknown = await res.json();
+  if (!data || typeof data !== 'object' || !('ok' in data) || typeof data.ok !== 'boolean') {
+    throw new Error(`Slack ${method} returned a malformed response; outcome unknown`);
+  }
+  if (data.ok === false && (!('error' in data) || typeof data.error !== 'string' || !data.error)) {
+    throw new Error(`Slack ${method} returned no rejection code; outcome unknown`);
+  }
+  return data as SlackApiResponse;
 }
 
 // Returns the posted message's ts, so the caller can later edit it in place (chat.update).
@@ -50,6 +66,7 @@ export async function postMessage(
     ...(options.username ? { username: options.username } : {}),
     ...(options.iconEmoji ? { icon_emoji: options.iconEmoji } : {}),
     ...(options.iconUrl ? { icon_url: options.iconUrl } : {}),
+    ...(options.deliveryId ? { metadata: { event_type: 'morehands_reply', event_payload: { delivery_id: options.deliveryId } } } : {}),
   };
   let data = await slackCall('chat.postMessage', token, body);
   // Persona identity is best-effort: an app without chat:write.customize must still reply.
@@ -60,12 +77,12 @@ export async function postMessage(
     delete body.icon_url;
     data = await slackCall('chat.postMessage', token, body);
   }
-  if (!data.ok) throw new Error(`slack chat.postMessage failed: ${data.error ?? 'unknown_error'}`);
+  if (!data.ok) throw new SlackApiError(data.error ?? 'unknown_error');
   return data.ts;
 }
 
-// Edit an existing message in place. Used to turn the "On it…" ack into the real reply, so a
-// turn shows as one evolving message instead of stacking ack + answer.
+// Edit a known message in place for progress/receipt chrome and explicit posting tools.
+// Engaged final answers are separate posts so a late progress edit cannot erase them.
 export async function editMessage(
   token: string,
   channel: string,
@@ -80,12 +97,11 @@ export async function editMessage(
     text: formatted,
     ...(options.blocks ? { blocks: options.blocks } : {}),
   });
-  if (!data.ok) throw new Error(`slack chat.update failed: ${data.error ?? 'unknown_error'}`);
+  if (!data.ok) throw new SlackApiError(data.error ?? 'unknown_error');
 }
 
-// Best-effort emoji reaction (reactions.add). Burst-absorb marks a parked message 👀 so the
-// sender knows it was seen without a second "On it…" ack. Never throws: needs the
-// reactions:write scope, and absorb must keep working (just silently) without it.
+// Best-effort emoji reaction for an additional message joining a live response.
+// Never throws: a missing reactions:write scope must not block native dispatch.
 export async function addReaction(token: string, channel: string, ts: string, name: string): Promise<void> {
   try {
     const res = await fetch('https://slack.com/api/reactions.add', {

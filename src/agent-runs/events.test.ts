@@ -1,6 +1,6 @@
 // Agent-run event plumbing invariants — run: npx tsx src/agent-runs/events.test.ts
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import {
   activateAgentRunRoute,
@@ -414,7 +414,7 @@ test('propose_agent_route tool creates a pending Pi route only', async () => {
 
   const tool = proposeAgentRouteTool({ db, projectId: 'P', createdBy: 'project-agent' });
   const output = JSON.parse(
-    await (tool as { execute: (args: Record<string, unknown>) => Promise<string> }).execute({
+    await invokeTool(tool, {
       provider: 'linear',
       externalKey: 'EDK',
       triggerType: 'state',
@@ -443,7 +443,7 @@ test('propose_agent_route with autoActivate: route goes live immediately; confli
   db.connections.push({ project_id: 'P', provider: 'github', status: 'active', config_json: JSON.stringify({ repo: 'acme/repo' }) });
 
   const tool = proposeAgentRouteTool({ db, projectId: 'P', autoActivate: true });
-  const exec = (tool as { execute: (a: Record<string, unknown>) => Promise<string> }).execute;
+  const exec = (args: Record<string, unknown>) => invokeTool(tool, args);
   const base = {
     provider: 'linear', externalKey: 'EDK', triggerType: 'state', triggerValue: 'Run Agent',
     githubOwner: 'acme', githubRepo: 'repo', baseBranch: 'main', reason: 'dogfood route',

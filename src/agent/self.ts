@@ -1,11 +1,12 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { ProviderCatalogEntry } from '../connections/catalog';
 import type { ConnectionState } from '../connections/repository';
 
 export interface SelfStatusInput {
   projectId: string;
   agentSlug: string;
+  engaged?: boolean;
   model: string;
   hasDb: boolean;
   hasBotToken: boolean;
@@ -53,6 +54,7 @@ export function buildSelfStatus(input: SelfStatusInput) {
     configKeys: Object.keys(state.config ?? {}).sort(),
   }));
   const githubConnected = input.connectionState.some((state) => state.provider === 'github' && state.status === 'connected');
+  const engaged = input.engaged !== false;
 
   return {
     identity: {
@@ -65,8 +67,14 @@ export function buildSelfStatus(input: SelfStatusInput) {
       model: input.model,
     },
     capabilities: {
-      reply: capability(true, ['reply_to_conversation'], 'Final answers must be delivered through this tool. Plain text outside it is discarded.'),
-      status: capability(true, ['update_status'], 'Use only for slow multi-step turns; it is not the final reply.'),
+      reply: capability(
+        true,
+        engaged ? [] : ['reply_to_conversation'],
+        engaged
+          ? 'Plain final text is delivered automatically to the current Slack thread through native Flue delivery; no reply tool is needed.'
+          : 'Autonomous turns have no automatic reply destination. Use reply_to_conversation with an explicit conversationId when a reply is needed.',
+      ),
+      status: capability(engaged, ['update_status'], 'Available only for engaged turns. Use only for slow multi-step turns; it is not the final reply.'),
       skills: capability(input.hasDb, ['save_skill', 'load_skill', 'archive_skill', 'restore_skill'], 'Project skills are durable procedures stored in D1.'),
       reminders: capability(
         input.hasDb,
@@ -146,8 +154,8 @@ export function selfStatusTool(input: SelfStatusInput): ToolDefinition {
       'Return your live MoreHands runtime and capability manifest for this turn. Use when the user asks what you can do, ' +
       'which tools/connections are available, how you work, or what your limits are. This is authoritative for current ' +
       'capability status and never exposes secrets.',
-    parameters: Type.Object({}),
-    async execute() {
+    input: v.object({}),
+    async run() {
       return JSON.stringify(buildSelfStatus(input), null, 2);
     },
   });

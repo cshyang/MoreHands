@@ -5,7 +5,7 @@
 // are isolated, and there is no hard-delete tool.
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import {
   loadSkillCatalog,
   loadActiveSkillBody,
@@ -160,7 +160,7 @@ const mkmd = (name: string, body = 'Steps here.') =>
   `---\nname: ${name}\ndescription: Use when testing ${name}.\n---\n${body}`;
 
 const invoke = (tools: ReturnType<typeof skillTools>, name: string, args: Record<string, unknown>) =>
-  (tools.find((t) => t.name === name) as { execute: (a: Record<string, unknown>) => Promise<string> }).execute(args);
+  invokeTool(tools.find((t) => t.name === name)!, args);
 
 const { test, run } = createTestRunner();
 

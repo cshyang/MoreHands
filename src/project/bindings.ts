@@ -8,43 +8,23 @@
 
 import type { D1Like } from '../skills/repository';
 import { assignSoul } from './souls';
+import { zaiProvider } from '@earendil-works/pi-ai/providers/zai';
+import { openrouterProvider } from '@earendil-works/pi-ai/providers/openrouter';
 
 export type SandboxMode = 'virtual' | 'cloudflare-sandbox' | 'daytona' | 'e2b';
 
-/** Default model when a binding doesn't pin one. Reverted to glm-5.1 on 2026-06-14: deepseek-v4-pro
- *  (default 2026-06-11) went dead-on-arrival in live traffic — every dispatch since the swap produced
- *  no reply (the gateway accepts the message and the turn dies at the model call; Flue posts nothing
- *  on a dead turn, so it reads as silence). glm-5.1 was the proven default before the mimo/deepseek
- *  detour — last-known-good. Routed via OpenRouter (the direct Z.ai provider was dropped in e5f5418). */
-export const DEFAULT_MODEL = 'openrouter/z-ai/glm-5.1';
+/** Operator-approved Flue 2 default. Catalog membership checks metadata, not live model performance. */
+export const DEFAULT_MODEL = 'zai/glm-5.3-flash';
 
-// Models whose context window we've VALIDATED — either present in pi-ai's catalog (Flue resolves
-// the window from there, e.g. openrouter/xiaomi/mimo-v2.5-pro → 1048576) or registered via
-// registerProvider() in app.ts.
-// A model OUTSIDE this set may resolve to an unknown (0) window, which silently disables Flue's
-// THRESHOLD compaction and leaves only reactive overflow-recovery (compaction after the provider
-// rejects for length — late and lossy). This guard turns that silent cliff into a loud log line.
-// Keep it in sync with the models you actually run; when adding an uncatalogued model (e.g. a
-// specific OpenRouter id), also register its window via registerProvider so the window is KNOWN.
-export const VALIDATED_MODELS: ReadonlySet<string> = new Set([
-  // Current default. Was the proven default before the mimo/deepseek detour — clean completions +
-  // tool calls through this exact pipeline. OpenRouter ctx ~203K (catalog-resolved).
-  'openrouter/z-ai/glm-5.1',
-  'openrouter/xiaomi/mimo-v2.5-pro', // catalog contextWindow 1048576
-  // Probed live 2026-06-11 (direct OpenRouter calls): plain completions return clean content (no
-  // reasoning chunks), tool calls produce valid tool_calls — auxiliary reasoning fields ride
-  // ALONGSIDE standard deltas (unlike kimi-k2.6's content:null), which OpenAI-compat parsers
-  // ignore. OpenRouter ctx 1048576. Canary-pinned per binding before becoming a default.
-  // ⚠️ 2026-06-14: made default 06-11, then produced ZERO replies in live traffic (dead-on-arrival,
-  // same symptom as kimi). Window is still valid; left here for reference, but do NOT default it
-  // again without a fresh live turn. The 06-11 "probe" was a direct API call, not a real DO turn.
-  'openrouter/deepseek/deepseek-v4-pro',
-  // ⚠️ kimi-k2.6 REMOVED from the recommended path (2026-06-11): it is a REASONING model —
-  // streams reasoning_details chunks with content:null first — and every live turn died before
-  // its first beat (dead-on-arrival; verified by direct OpenRouter probe). Do not pin it until
-  // the pi-ai/Flue stream pipeline handles reasoning deltas. Window validation alone is NOT
-  // model validation: run a live turn before recommending a model here.
-]);
+// Match the native providers bundled by flue.config.ts. Check their own Pi catalogs rather than
+// maintaining a second model list. A positive window preserves the existing pin/compaction policy.
+const modelProviders = [zaiProvider(), openrouterProvider()];
+export function hasCataloguedModel(model: string): boolean {
+  const slash = model.indexOf('/');
+  if (slash < 1) return false;
+  const provider = modelProviders.find((candidate) => candidate.id === model.slice(0, slash));
+  return provider?.getModels().some((candidate) => candidate.id === model.slice(slash + 1) && candidate.contextWindow > 0) ?? false;
+}
 
 // Warn at most once per model id per process — visibility in `wrangler tail` without per-turn spam
 // (the initializer resolves the model on every dispatch). Module-level; resets on a cold start.
@@ -55,13 +35,12 @@ const warnedUnvalidatedModels = new Set<string>();
  *  unvalidated model is flagged loudly so a model swap can't quietly turn off compaction. */
 export function resolveModel(model?: string): string {
   const chosen = model ?? DEFAULT_MODEL;
-  if (!VALIDATED_MODELS.has(chosen) && !warnedUnvalidatedModels.has(chosen)) {
+  if (!hasCataloguedModel(chosen) && !warnedUnvalidatedModels.has(chosen)) {
     warnedUnvalidatedModels.add(chosen);
     console.warn(
-      `[model-guard] "${chosen}" is not in VALIDATED_MODELS — its context window may resolve to ` +
-        `unknown (0), which disables threshold compaction (leaving only reactive overflow recovery). ` +
-        `Add it to VALIDATED_MODELS in bindings.ts, and register its window via registerProvider in ` +
-        `app.ts if pi-ai's catalog doesn't know it.`,
+      `[model-guard] "${chosen}" has no positive context window in the bundled native provider catalog. ` +
+        `Check the provider/model pin and installed Pi catalog; Flue will reject unresolvable model IDs. ` +
+        `Catalog membership is not a claim of live performance validation.`,
     );
   }
   return chosen;
@@ -73,11 +52,10 @@ export function resolveModel(model?: string): string {
  *  empty) is always fine — it resolves to DEFAULT_MODEL at read time. */
 export function assertValidModel(model?: string | null): void {
   if (!model) return; // unpinned → DEFAULT_MODEL at read time
-  if (!VALIDATED_MODELS.has(model)) {
+  if (!hasCataloguedModel(model)) {
     throw new Error(
-      `[model-guard] refusing to pin unvalidated model "${model}": its context window may resolve ` +
-        `to unknown (0), disabling threshold compaction. Add it to VALIDATED_MODELS in bindings.ts ` +
-        `(and register its window via registerProvider in app.ts if pi-ai's catalog doesn't know it).`,
+      `[model-guard] refusing to pin model "${model}": no positive context window in the bundled native provider catalog. ` +
+        `Check the provider/model ID or update the installed Pi catalog before pinning it.`,
     );
   }
 }
@@ -97,13 +75,10 @@ export const DEFAULT_AGENT_SLUG = 'default';
 // ids are sticky — renaming one makes a NEW DO and orphans its history. Build + parse
 // go through these two functions so the format never drifts across dispatch sites.
 //
-// FLUE_SESSION_GENERATION bumps the id of EVERY instance at once. Flue stores per-DO
-// SessionData with a format version and throws on an older one (1.0 writes v6 and rejects
-// the v5 written by 0.11). Bumping this appends a token that makes every conversation,
-// heartbeat, and job resolve to a fresh, empty DO — discarding prior Flue session state in
-// one shot, no per-DO migration. The token is stripped before parsing, so projectId/slug/
-// scope (and every D1 lookup keyed on them) are unchanged. Bump only on such an upgrade.
-const FLUE_SESSION_GENERATION = 1;
+// Flue beta session state is incompatible with Flue 2 canonical conversation storage.
+// Generation 2 selects fresh instances without deleting the old namespace. Parsing strips
+// the token, so project/persona/scope identities and all durable D1 product data stay intact.
+const FLUE_SESSION_GENERATION = 2;
 const GENERATION_SUFFIX = FLUE_SESSION_GENERATION > 0 ? `@g${FLUE_SESSION_GENERATION}` : '';
 
 export function agentInstanceId(projectId: string, scope?: string, slug: string = DEFAULT_AGENT_SLUG): string {

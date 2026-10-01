@@ -160,6 +160,14 @@ class FakeD1 implements D1Like {
       else this.activities.push(next);
       return { meta: { changes: 1 } };
     }
+    if (q.startsWith('UPDATE slack_turn_activity SET status=')) {
+      const [status, activities_json, last_posted_at, updated_at, completed_at, project_id, session_id, ack_message_ts] = v;
+      const existing = this.activities.find((r) => r.project_id === project_id && r.session_id === session_id
+        && r.status === 'active' && r.ack_message_ts === ack_message_ts);
+      if (!existing) return { meta: { changes: 0 } };
+      Object.assign(existing, { status, activities_json, last_posted_at, updated_at, completed_at });
+      return { meta: { changes: 1 } };
+    }
     return { meta: { changes: 0 } };
   }
 }

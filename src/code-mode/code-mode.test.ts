@@ -1,8 +1,7 @@
 // Coordinator Dynamic Workers code-mode invariants — run: npx tsx src/code-mode/code-mode.test.ts
 
 import assert from 'node:assert/strict';
-import type { ToolDefinition } from '@flue/runtime';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import {
   buildDynamicWorkerCode,
@@ -311,7 +310,7 @@ test('execute_code tool returns JSON and never includes Worker secrets from env'
     projectId: 'P',
     env: { NANGO_SECRET_KEY: 'nk_secret', SLACK_BOT_TOKEN_DEFAULT: 'xoxb-secret' },
   });
-  const output = await (tool as ToolDefinition & { execute: (args: unknown) => Promise<string> }).execute({
+  const output = await invokeTool(tool, {
     language: 'javascript',
     code: 'export default async function main() { return "ok"; }',
     purpose: 'safe',
@@ -320,6 +319,22 @@ test('execute_code tool returns JSON and never includes Worker secrets from env'
   assert.equal(output.includes('nk_secret'), false);
   assert.equal(output.includes('xoxb-secret'), false);
   assert.equal(JSON.parse(output).status, 'completed');
+});
+
+test('execute_code input validates enums, preserves optional JSON input, and requires purpose', async () => {
+  const db = new FakeD1();
+  const loader = new FakeLoader();
+  const [tool] = codeModeTools({ db, loader, projectId: 'P' });
+  const params = { language: 'javascript', code: 'export default async function main() { return "ok"; }', purpose: 'validation' };
+
+  await assert.rejects(invokeTool(tool, { ...params, language: 'ruby' }));
+  await assert.rejects(invokeTool(tool, { ...params, network: 'private' }));
+  await assert.rejects(invokeTool(tool, { language: params.language, code: params.code }));
+  assert.equal(db.rows.length, 0, 'invalid inputs do not reach the execution audit or loader');
+
+  const output = JSON.parse(await invokeTool(tool, { ...params, input: { rows: [1, null, true] } }));
+  assert.equal(output.status, 'completed');
+  assert.equal(output.network, 'open_public', 'omitting network preserves the operation default');
 });
 
 test('listCodeExecutionAudits returns recent capped rows for one project', async () => {

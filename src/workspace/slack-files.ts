@@ -5,7 +5,7 @@
 // model never sees url_private. The container only boots when the model actually loads a file.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { safeJson } from '../shared/bounded';
 import { withWallClock } from '../shared/wall-clock';
@@ -263,12 +263,12 @@ export function workspaceSlackFileTools(args: {
           name: 'workspace_send_file',
           description:
             'Upload a file from the sandbox container into the current Slack thread (e.g. a generated CSV or chart). Pass the container path; the destination is resolved from conversationId like reply_to_conversation. Size cap ~20MB. This shares the file — still send your text answer via reply_to_conversation.',
-          parameters: Type.Object({
-            path: Type.String({ description: 'Absolute container path of the file to send, e.g. /workspace/out/result.csv.' }),
-            title: Type.Optional(Type.String({ description: 'Display title in Slack. Defaults to the filename.' })),
-            conversationId: Type.Optional(Type.String({ description: 'Copy from the current Dispatch Input, same as your reply.' })),
+          input: v.object({
+            path: v.pipe(v.string(), v.description('Absolute container path of the file to send, e.g. /workspace/out/result.csv.')),
+            title: v.optional(v.pipe(v.string(), v.description('Display title in Slack. Defaults to the filename.'))),
+            conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input, same as your reply.'))),
           }),
-          async execute(params) {
+          async run({ data: params }) {
             return safeJson(
               await workspaceSendFile(
                 { db: deps.db, sandbox: deps.sandbox, projectId: deps.projectId, env: deps.env, resolveTarget, fetcher: deps.fetcher },
@@ -285,11 +285,11 @@ export function workspaceSlackFileTools(args: {
       name: 'workspace_load_slack_file',
       description:
         `Download a file the user attached in Slack into this project's sandbox container under ${WORKSPACE_INPUTS_DIR}/, returning its container path. Use the file ids listed in attachedFiles on the current Dispatch Input. Size cap ~20MB. After loading, process the file with workspace_exec (python3 with pandas is available).`,
-      parameters: Type.Object({
-        fileId: Type.String({ description: 'Slack file id from attachedFiles, e.g. F0123456789.' }),
-        conversationId: Type.String({ description: 'Copy from the current Dispatch Input. Required: files can only be loaded from their attached conversation.' }),
+      input: v.object({
+        fileId: v.pipe(v.string(), v.description('Slack file id from attachedFiles, e.g. F0123456789.')),
+        conversationId: v.pipe(v.string(), v.description('Copy from the current Dispatch Input. Required: files can only be loaded from their attached conversation.')),
       }),
-      async execute(params) {
+      async run({ data: params }) {
         return safeJson(await workspaceLoadSlackFile(deps, params as { fileId: string; conversationId?: string }));
       },
     }),

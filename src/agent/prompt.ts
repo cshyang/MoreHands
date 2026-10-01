@@ -26,6 +26,8 @@ export interface BuildInstructionsOptions {
   /** Pre-rendered "YOUR CONNECTIONS" block (see src/connections/repository.ts), or null. Semi-stable (changes
    *  only when a connection is added/removed), so it sits with the skills catalog, before memory. */
   connectionsBlock?: string | null;
+  /** Engaged replies are plain final text; autonomous posts remain an intentional tool action. */
+  engaged?: boolean;
 }
 
 // Anti-fabrication / finish-the-job. The deliverable is real output, not a description
@@ -41,7 +43,7 @@ const FINISHING_THE_JOB =
 // Tool-use enforcement: act by calling tools, in this turn — don't narrate intent and stop.
 const USING_YOUR_TOOLS =
   `USING YOUR TOOLS\n` +
-  `Act by calling tools — don't narrate what you'll do and then stop. If you say you'll reply, save a ` +
+  `Act by calling tools — don't narrate what you'll do and then stop. If you say you'll save a ` +
   `skill, set a reminder, or open a skill, make that call in the same turn. Never end a turn with a ` +
   `promise of future action; do it now.`;
 
@@ -93,7 +95,7 @@ const WORKSPACE_SANDBOX =
   `workspace_load_slack_file pulls a Slack attachment (ids in attachedFiles on the Dispatch Input) into ` +
   `/workspace/inputs, workspace_exec runs shell commands, workspace_write_file/workspace_read_file move text ` +
   `in and out, and workspace_send_file posts a generated file back into the thread (your text answer still ` +
-  `goes through reply_to_conversation). The container filesystem is EPHEMERAL: it sleeps after ~10 idle ` +
+  `follows this turn's delivery rule). The container filesystem is EPHEMERAL: it sleeps after ~10 idle ` +
   `minutes and loses everything, so never assume files from earlier turns still exist — re-load inputs and ` +
   `verify with ls before reusing state. The first command after idle takes ~6s extra. Boundary: execute_code ` +
   `for small pure functions; workspace for anything touching files or shell. The container receives no ` +
@@ -128,7 +130,7 @@ function skillsBlock(catalog: { name: string; description: string }[]): string {
 }
 
 export function buildInstructions(opts: BuildInstructionsOptions): string {
-  const { projectName, personality, catalog, memoryBlock, connectionsBlock } = opts;
+  const { projectName, personality, catalog, memoryBlock, connectionsBlock, engaged = true } = opts;
   const blocks: string[] = [];
 
   // 1. Identity (stable).
@@ -146,10 +148,10 @@ export function buildInstructions(opts: BuildInstructionsOptions): string {
   // 3. Fixed mechanics — how a turn arrives and how words reach the channel.
   blocks.push(
     `HOW YOU WORK (fixed)\n` +
-      `Each turn arrives as a "[Dispatch Input]" block — read the JSON under "input:" and act on it:\n` +
-      `• "message" field → a person's message. Respond helpfully and concisely; pass its "conversationId" AND ` +
-      `"ackMessageTs" (when present) to reply_to_conversation so your reply lands in the originating thread and ` +
-      `replaces the working note in place instead of stacking a second message.\n` +
+      `Each turn arrives as a signal containing JSON input — read its body and act on it:\n` +
+      `• "message" field → a person's message. Respond helpfully and concisely with plain final answer text. ` +
+      `The system delivers that answer to the originating thread below the working note; ` +
+      `you never choose the reply destination or acknowledgement timestamp.\n` +
       `• "threadContext" field (when present) → the earlier messages in this Slack thread, oldest first, ` +
       `with your own past replies marked "you (earlier)". Read it as the conversation so far before you ` +
       `answer the "message"; it is context, not a new request, and you've already seen it.\n` +
@@ -163,18 +165,18 @@ export function buildInstructions(opts: BuildInstructionsOptions): string {
       `• "kind":"work_item" → a durable MoreHands workbench task. Read the workItemId, call get_work_item before ` +
       `starting, use update_work_item to mark running/blocked/completed/failed as you make progress, and create child ` +
       `work items only for real subtasks. Do not invent file/artifact references; those are backend-owned evidence.\n` +
-      `• reply_to_conversation is the ONLY way your words reach the project space. Plain text you write — INCLUDING a ` +
-      `complete answer you compose after tool calls — is silently DISCARDED; the user sees nothing. So your turn's FINAL ` +
-      `action is ALWAYS a reply_to_conversation call carrying your full answer. Gathering data with tools and then stopping ` +
-      `= the user gets silence and the turn has FAILED. Don't mention tools or the dispatch envelope.\n` +
+      `• For engaged user messages, your complete plain final text is the answer: finish after tools with the real result, ` +
+      `not a promise or a tool transcript. reply_to_conversation is unavailable on these turns. For scheduled or autonomous ` +
+      `turns, intentional posts go through reply_to_conversation; plain final text is not published. Quiet work, reflection, ` +
+      `and no-op autonomous turns should produce no public output. Don't mention tools or the signal envelope.\n` +
       `• update_status — the moment a person messages, the system already posts a quick working note (e.g. "On it…") and gives you its ` +
       `"ackMessageTs", so don't post another generic acknowledgement. On a SLOW, multi-step turn, call update_status for ` +
       `up to 3 meaningful phase updates (lead with an emoji, e.g. "🔍 Checking the repo…", "📋 Reading the Linear issue…", ` +
-      `"🧪 Running tests…"), passing the same conversationId AND ackMessageTs so the note updates IN PLACE. Use human-readable ` +
+      `"Running tests…"). The system binds the note to this thread and acknowledgement so it updates IN PLACE. Use human-readable ` +
       `activity, do not list raw tool names or argument dumps. Automatic activity receipts may already show routine tool work, ` +
       `so use update_status only for meaningful non-tool phases or long stretches; do not duplicate automatic tool activity. ` +
       `Skip it for quick answers and heartbeat runs. It is NOT your reply; ` +
-      `still send the answer with reply_to_conversation (also carrying ackMessageTs).`,
+      `still finish with your complete plain final answer text.`,
   );
 
   // 4–7. Behavioral guidance + platform — stable, model-agnostic, always on.
@@ -212,14 +214,14 @@ export function buildInstructions(opts: BuildInstructionsOptions): string {
   // 11. Memory — MOST volatile (changes per turn and per author), so it goes dead last.
   if (memoryBlock) blocks.push(memoryBlock);
 
-  // 12. Terminal delivery mandate — placed LAST for recency weight. The confirmed silent-agent
-  // failure mode is the model gathering data via tools, then ending the turn in plain text without
-  // calling reply_to_conversation. This last line fights that directly, after everything else.
+  // 12. Delivery rule — last for recency weight, scoped to the delivery rather than every turn.
   blocks.push(
-    `BEFORE YOU STOP\n` +
-      `End every turn by calling reply_to_conversation with your complete answer. If you used tools to gather ` +
-      `information, you STILL must deliver the result through reply_to_conversation — text written outside that tool is ` +
-      `discarded and the user sees nothing. A turn that ends without a reply_to_conversation call has failed.`,
+    `BEFORE YOU STOP\n` + (engaged
+      ? `Finish this engaged user turn with your complete plain final answer. The system publishes it automatically ` +
+        `to this conversation. Tool work alone is not an answer; report the real result and any blockers honestly.`
+      : `This is autonomous work, with nobody waiting for a chat reply. Publish only meaningful intentional results ` +
+        `through reply_to_conversation (or the budgeted proactive tool where instructed). Otherwise stay quiet: ` +
+        `do not emit a public answer, generic acknowledgement, or invented completion notice.`),
   );
 
   return blocks.join('\n\n');

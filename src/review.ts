@@ -10,7 +10,7 @@
 // venue (thread-only, this binding's channel only), budgets, and shadow mode IN CODE.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from './skills/repository';
 import type { Binding } from './project/bindings';
 import type { ConversationTarget } from './project/conversations';
@@ -296,14 +296,12 @@ export function proactiveReplyTool(deps: ProactiveReplyDeps): ToolDefinition {
       'message you are responding to, kind "answer" (answering an unanswered question, with a receipt) or ' +
       '"observation" (a verified link to earlier discussion, a due commitment), and 1–2 sentences. Budgeted ' +
       'and thread-only; use sparingly — silence is the default.',
-    parameters: Type.Object({
-      conversationId: Type.String({ description: 'The (conversationId) prefix of the activity line you are replying to.' }),
-      kind: Type.Union([Type.Literal('answer'), Type.Literal('observation')], {
-        description: '"answer" = answering an unanswered question; "observation" = anything else.',
-      }),
-      text: Type.String({ description: '1–2 sentences + your receipt (link/source). Short — it interrupts people.' }),
+    input: v.object({
+      conversationId: v.pipe(v.string(), v.description('The (conversationId) prefix of the activity line you are replying to.')),
+      kind: v.pipe(v.union([v.literal('answer'), v.literal('observation')]), v.description('"answer" = answering an unanswered question; "observation" = anything else.')),
+      text: v.pipe(v.string(), v.description('1–2 sentences + your receipt (link/source). Short — it interrupts people.')),
     }),
-    async execute({ conversationId, kind, text }) {
+    async run({ data: { conversationId, kind, text } }) {
       const conv = String(conversationId);
       const k = kind === 'answer' ? 'answer' : 'observation';
       const body = String(text).trim();

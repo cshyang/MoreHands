@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { activateAgentRunRoute, createAgentRunRoute } from './events';
 
@@ -14,18 +14,18 @@ export function proposeAgentRouteTool(args: { db: D1Like; projectId: string; cre
     description: args.autoActivate
       ? 'Create an agent-run route for this project (auto-activated in this deployment). The target repo must already be allowed on the project\'s GitHub connection.'
       : 'Propose a pending agent-run route for this project. This never activates launch routes; an admin must review and activate it separately.',
-    parameters: Type.Object({
-      provider: Type.String({ description: 'Provider that emits the trigger, e.g. linear.' }),
-      externalKey: Type.String({ description: 'Provider workspace/team/project key, e.g. a Linear team key.' }),
-      triggerType: Type.String({ description: 'Trigger type: state, label, or command.' }),
-      triggerValue: Type.String({ description: 'Exact trigger value, e.g. Run Agent.' }),
-      githubOwner: Type.String({ description: 'GitHub owner for the target repository.' }),
-      githubRepo: Type.String({ description: 'GitHub repository name.' }),
-      baseBranch: Type.String({ description: 'Base branch for runner PRs, usually main.' }),
-      kit: Type.Optional(Type.String({ description: 'Agent Kit id. Defaults to coding-default.' })),
-      reason: Type.String({ description: 'Why this route should exist, for admin review.' }),
+    input: v.object({
+      provider: v.pipe(v.string(), v.description('Provider that emits the trigger, e.g. linear.')),
+      externalKey: v.pipe(v.string(), v.description('Provider workspace/team/project key, e.g. a Linear team key.')),
+      triggerType: v.pipe(v.string(), v.description('Trigger type: state, label, or command.')),
+      triggerValue: v.pipe(v.string(), v.description('Exact trigger value, e.g. Run Agent.')),
+      githubOwner: v.pipe(v.string(), v.description('GitHub owner for the target repository.')),
+      githubRepo: v.pipe(v.string(), v.description('GitHub repository name.')),
+      baseBranch: v.pipe(v.string(), v.description('Base branch for runner PRs, usually main.')),
+      kit: v.optional(v.pipe(v.string(), v.description('Agent Kit id. Defaults to coding-default.'))),
+      reason: v.pipe(v.string(), v.description('Why this route should exist, for admin review.')),
     }),
-    async execute(input) {
+    async run({ data: input }) {
       let route = await createAgentRunRoute(args.db, {
         projectId: args.projectId,
         provider: input.provider,

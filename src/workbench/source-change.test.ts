@@ -1,6 +1,7 @@
 // Source-change workbench invariants — run: npx tsx src/workbench/source-change.test.ts
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import type { ToolDefinition } from '@flue/runtime';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import { createWorkItem, createWorkRun, getWorkItem } from './repository';
 import { handleSourceChangeRunCallback, sourceChangeTools } from './source-change';
@@ -191,10 +192,10 @@ function seq() {
   };
 }
 
-function tool<T = unknown>(tools: { name: string; execute?: (args: Record<string, unknown>) => Promise<T> }[], name: string) {
+function tool(tools: ToolDefinition[], name: string) {
   const found = tools.find((t) => t.name === name);
-  assert.ok(found?.execute, `missing tool ${name}`);
-  return found.execute;
+  assert.ok(found, `missing tool ${name}`);
+  return (args: Record<string, unknown>) => invokeTool(found, args);
 }
 
 const request = {
@@ -209,7 +210,7 @@ const request = {
 
 test('propose_self_change creates a project-scoped structured source-change work item', async () => {
   const db = new FakeD1();
-  const propose = tool<string>(sourceChangeTools({ db, projectId: 'P', deps: seq() }), 'propose_self_change');
+  const propose = tool(sourceChangeTools({ db, projectId: 'P', deps: seq() }), 'propose_self_change');
 
   const item = JSON.parse(await propose(request));
   const body = JSON.parse(item.body);
@@ -239,8 +240,8 @@ test('dispatch_coding_run creates a coding_webhook run and posts the generic run
     fetch: fetcher,
     deps,
   });
-  const item = JSON.parse(await tool<string>(tools, 'propose_self_change')(request));
-  const result = JSON.parse(await tool<string>(tools, 'dispatch_coding_run')({ workItemId: item.id }));
+  const item = JSON.parse(await tool(tools, 'propose_self_change')(request));
+  const result = JSON.parse(await tool(tools, 'dispatch_coding_run')({ workItemId: item.id }));
 
   assert.equal(result.dispatchStatus, 'dispatched');
   assert.equal(db.workRuns[0].runner, 'coding_webhook');
@@ -268,8 +269,8 @@ test('dispatch_coding_run records failed runner dispatch without losing the work
     fetch: async () => new Response('down', { status: 500 }),
     deps,
   });
-  const item = JSON.parse(await tool<string>(tools, 'propose_self_change')(request));
-  const result = JSON.parse(await tool<string>(tools, 'dispatch_coding_run')({ workItemId: item.id }));
+  const item = JSON.parse(await tool(tools, 'propose_self_change')(request));
+  const result = JSON.parse(await tool(tools, 'dispatch_coding_run')({ workItemId: item.id }));
 
   assert.equal(result.dispatchStatus, 'failed');
   assert.equal(db.workRuns[0].status, 'failed');

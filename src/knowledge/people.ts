@@ -8,7 +8,7 @@
 // bad entry is attributable and cleanable. Read path is tool-time (who_is), never injected.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 
 export const GLOBAL_PROJECT_ID = '__global__';
@@ -90,10 +90,10 @@ export function peopleTools(db: D1Like | undefined, projectId: string): ToolDefi
       'Look up the company-wide people record (shared across ALL channels): role, timezone, preferences, ' +
       'ownership. Pass a name or a sender id to filter, or omit to list everyone. Use this before answering ' +
       'questions about a person and before save_person_fact (to avoid near-duplicates).',
-    parameters: Type.Object({
-      query: Type.Optional(Type.String({ description: 'Name fragment or sender id, e.g. "Sarah" or "slack:T123:U456". Omit for all.' })),
+    input: v.object({
+      query: v.optional(v.pipe(v.string(), v.description('Name fragment or sender id, e.g. "Sarah" or "slack:T123:U456". Omit for all.'))),
     }),
-    async execute({ query }) {
+    async run({ data: { query } }) {
       return renderPersonFacts(await listPersonFacts(store(), query ? String(query) : undefined));
     },
   });
@@ -106,11 +106,11 @@ export function peopleTools(db: D1Like | undefined, projectId: string): ToolDefi
       'owns the deploy pipeline (slack:T1:U2, self-stated in #eng)"). NOT allowed: third-party claims, opinions ' +
       'about people, anything sensitive or from a clearly private context — those stay in channel memory. ' +
       'Subject is the person\'s sender id from the dispatch input; start the fact with their name.',
-    parameters: Type.Object({
-      subject: Type.String({ description: 'The person\'s qualified sender id, e.g. "slack:T0B6VB:U0B6VB" — copy it from the dispatch input.' }),
-      fact: Type.String({ description: 'One compact declarative fact, starting with the person\'s name.' }),
+    input: v.object({
+      subject: v.pipe(v.string(), v.description('The person\'s qualified sender id, e.g. "slack:T0B6VB:U0B6VB" — copy it from the dispatch input.')),
+      fact: v.pipe(v.string(), v.description('One compact declarative fact, starting with the person\'s name.')),
     }),
-    async execute({ subject, fact }) {
+    async run({ data: { subject, fact } }) {
       const res = await savePersonFact(store(), { subject: String(subject), fact: String(fact), sourceProjectId: projectId });
       return res.saved ? 'saved to the global people record.' : `not saved: ${res.reason}`;
     },
@@ -121,8 +121,8 @@ export function peopleTools(db: D1Like | undefined, projectId: string): ToolDefi
     description:
       'Delete a fact from the company-wide people record by id (from who_is). Use when a person corrects or ' +
       'asks to remove something about themselves — honor that immediately.',
-    parameters: Type.Object({ id: Type.Number({ description: 'Fact id from who_is output.' }) }),
-    async execute({ id }) {
+    input: v.object({ id: v.pipe(v.number(), v.description('Fact id from who_is output.')) }),
+    async run({ data: { id } }) {
       const res = await forgetPersonFact(store(), Number(id));
       return res.found ? `forgot fact ${id}.` : `no fact with id ${id} in the people record.`;
     },

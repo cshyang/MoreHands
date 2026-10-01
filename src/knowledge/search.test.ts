@@ -1,6 +1,6 @@
 // Cross-thread Connect + catch-up retrieval — run: npx tsx src/knowledge/search.test.ts
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import { buildSearchTerms, parseConversationId, searchRelatedThreads, recentThreads } from './search';
 import type { D1Like } from '../skills/repository';
 
@@ -137,9 +137,7 @@ test('recentThreads: empty channel → []', async () => {
 });
 
 // ── tool surface ─────────────────────────────────────────────────────────────
-// Tools' execute is called the way the codebase does it (see users.test.ts): a single-arg cast.
-const callTool = (tool: { execute: unknown }, args: unknown) =>
-  (tool.execute as (a: unknown) => Promise<unknown>)(args);
+const callTool = invokeTool;
 
 test('searchTools: exposes exactly search_channel', async () => {
   const { searchTools } = await import('./search');

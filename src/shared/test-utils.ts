@@ -1,3 +1,19 @@
+import assert from 'node:assert/strict';
+import type { ToolDefinition } from '@flue/runtime';
+import * as v from 'valibot';
+
+export async function invokeTool(tool: ToolDefinition, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> {
+  const data = tool.input ? v.parse(tool.input, args) : undefined;
+  const result = await tool.run({
+    data,
+    toolCallId: 'test-tool-call',
+    log: { info() {}, warn() {}, error() {} },
+    signal,
+  });
+  assert.ok(typeof result === 'string', `expected a string result from ${tool.name}`);
+  return result;
+}
+
 export type TestFn = () => Promise<void> | void;
 
 export function createTestRunner(): {

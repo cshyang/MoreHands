@@ -9,12 +9,10 @@
   "kv_namespaces": [
     { "binding": "SLACK_EVENTS", "id": "21c63a4fa37540159e6e8b0a1ac19b66" }
   ],
-  // The cron clock, in-house since Flue 0.11 (the generated entry forwards `scheduled`,
-  // so the external hatchery-ticker worker is retired). Expressions are mirrored as
-  // constants in .flue/cloudflare.ts — keep both in sync. UTC, no DST shift.
+  // Product-task cron clock. Expressions are mirrored as constants in src/cloudflare.ts —
+  // keep both in sync. Runtime alarms own agent liveness. UTC, no DST shift.
   "triggers": {
     "crons": [
-      "0 */6 * * *", // liveness backstop heartbeat
       "0 19 * * *", // nightly REM reflect-sweep (03:00 KL)
       "*/2 * * * *", // agent-run outbox reconcile
       "* * * * *" // reminder due-scan (minute precision)
@@ -29,9 +27,9 @@
   "d1_databases": [
     { "binding": "DB", "database_name": "hatchery-skills", "database_id": "6ac5de79-a8c0-4e08-aab8-b9b636278a9d" }
   ],
-  // Flue 0.11 generates + merges the agent DO bindings itself (FLUE_PROJECT_AGENT,
-  // FLUE_REGISTRY) — only application-owned DOs are declared here. The Sandbox class
-  // is exported from .flue/cloudflare.ts (0.11 dropped the auto-wiring).
+  // Flue's Vite plugin contributes FLUE_PROJECT_AGENT from the authored Project agent.
+  // Only application-owned DO bindings are declared here. Sandbox is exported from
+  // src/cloudflare.ts. Historical classes and migration tags below remain unchanged.
   "durable_objects": {
     "bindings": [
       // Workspace sandbox: real container with shell/fs/git for coordinator workspace tasks.

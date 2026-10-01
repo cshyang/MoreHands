@@ -6,7 +6,7 @@
 // a no-op there.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { setBindingOverhear } from './bindings';
 
@@ -20,10 +20,10 @@ export function overhearingTools(db: D1Like | undefined, projectId: string): Too
         "here as it arrives and reply (within a daily budget) when you can genuinely help — without being " +
         '@mentioned. Use this only when a user explicitly asks you to start (or stop) chiming in unprompted ' +
         'on this channel. Default is OFF (you only respond when @mentioned or following up in your own thread).',
-      parameters: Type.Object({
-        enabled: Type.Boolean({ description: 'true = start overhearing this channel; false = stop.' }),
+      input: v.object({
+        enabled: v.pipe(v.boolean(), v.description('true = start overhearing this channel; false = stop.')),
       }),
-      async execute({ enabled }) {
+      async run({ data: { enabled } }) {
         const on = enabled === true;
         await setBindingOverhear(db, projectId, on);
         return on

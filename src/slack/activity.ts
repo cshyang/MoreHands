@@ -1,4 +1,4 @@
-import type { FlueContext, FlueEvent } from '@flue/runtime';
+import type { FlueEventContext, FlueEvent } from '@flue/runtime';
 import { parseAgentInstanceId } from '../project/bindings';
 import type { D1Like } from '../skills/repository';
 import { editMessage } from './post';
@@ -65,6 +65,29 @@ interface RecordSlackActivityLabelInput {
 const POST_THROTTLE_MS = 1500;
 const MAX_VISIBLE_ACTIVITY_ROWS = 6;
 const STREAM_RESPONSE_LABEL = 'Receiving stream response';
+
+// Observer promises are not awaited by Flue. Serialize receipt edits with the final reply
+// in the originating isolate so a slow earlier chat.update cannot land after the answer.
+const receiptQueues = new WeakMap<D1Like, Map<string, Promise<unknown>>>();
+
+export async function withSlackActivityLock<T>(db: D1Like, projectId: string, sessionId: string, action: () => Promise<T>): Promise<T> {
+  let queues = receiptQueues.get(db);
+  if (!queues) receiptQueues.set(db, (queues = new Map()));
+  const key = `${projectId}\n${sessionId}`;
+  const previous = queues.get(key) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(action);
+  queues.set(key, next);
+  try {
+    return await next;
+  } finally {
+    if (queues.get(key) === next) queues.delete(key);
+  }
+}
+
+export async function findActiveSlackTurnActivity(db: D1Like, projectId: string, conversationId: string): Promise<SlackTurnActivity | null> {
+  const activity = await loadSlackTurnActivity(db, projectId, `conv:${conversationId}`);
+  return activity?.status === 'active' ? activity : null;
+}
 
 export async function createSlackTurnActivity(db: D1Like, input: CreateSlackTurnActivityInput): Promise<SlackTurnActivity> {
   const now = input.now ?? Date.now();
@@ -148,14 +171,11 @@ async function recordSlackActivityLabel(
     activity.lastPostedAt == null || input.terminal === true || input.forcePost === true || now - activity.lastPostedAt >= POST_THROTTLE_MS;
   activity.lastPostedAt = shouldPost ? now : activity.lastPostedAt;
   activity.updatedAt = now;
-  await upsertActivity(db, activity);
-  return { activity, shouldPost };
+  const updated = await updateActiveActivity(db, activity);
+  return updated ? { activity, shouldPost } : null;
 }
 
-/** A streaming model emits token deltas many times a second — far too often to write D1 per token.
- *  A delta bumps updated_at at most once per this window: enough to prove the stream is alive, cheap
- *  enough to ignore. Without it the clock freezes at message_start, and a healthy long generation is
- *  indistinguishable from a hung stream — the gap that forces the reaper's conservative window. */
+/** Stream deltas refresh UI telemetry at most once per window; native durability owns deadlines. */
 export const STREAM_HEARTBEAT_MS = 5_000;
 
 /** Token-level stream beat (text/thinking delta). The model still emitting tokens is the truest proof
@@ -164,14 +184,15 @@ export const STREAM_HEARTBEAT_MS = 5_000;
  *  thread. The throttle and the no-rewind guard both live in the WHERE clause (atomic). */
 export async function recordSlackStreamHeartbeat(
   db: D1Like,
-  input: { projectId: string; sessionId: string; now?: number },
+  input: { projectId: string; sessionId: string; now?: number; expectedAckMessageTs?: string },
 ): Promise<void> {
   const now = input.now ?? Date.now();
   await db
     .prepare(
-      `UPDATE slack_turn_activity SET updated_at=? WHERE project_id=? AND session_id=? AND status='active' AND updated_at <= ?`,
+      `UPDATE slack_turn_activity SET updated_at=? WHERE project_id=? AND session_id=? AND status='active' AND updated_at <= ?
+       AND (? IS NULL OR ack_message_ts=?)`,
     )
-    .bind(now, input.projectId, input.sessionId, now - STREAM_HEARTBEAT_MS)
+    .bind(now, input.projectId, input.sessionId, now - STREAM_HEARTBEAT_MS, input.expectedAckMessageTs ?? null, input.expectedAckMessageTs ?? null)
     .run();
 }
 
@@ -181,9 +202,10 @@ export async function completeSlackTurnActivity(
   sessionId: string,
   status: Extract<SlackTurnActivityStatus, 'completed' | 'failed'> = 'completed',
   now: number = Date.now(),
+  expectedAckMessageTs?: string,
 ): Promise<SlackTurnActivity | null> {
   const activity = await loadSlackTurnActivity(db, projectId, sessionId);
-  if (!activity) return null;
+  if (!activity || (expectedAckMessageTs && activity.ackMessageTs !== expectedAckMessageTs)) return null;
   activity.status = status;
   activity.updatedAt = now;
   activity.completedAt = now;
@@ -191,17 +213,31 @@ export async function completeSlackTurnActivity(
   for (const item of activity.activities) {
     if (item.status === 'running') item.status = 'completed';
   }
-  await upsertActivity(db, activity);
-  if (status === 'completed') {
-    // A successful turn proves the session healthy — the dead-on-arrival streak (the reaper's
-    // wedged-session signal) resets. Targeted update; the receipt upsert never touches doa_count.
-    await db
-      .prepare('UPDATE slack_turn_activity SET doa_count=0 WHERE project_id=? AND session_id=? AND doa_count>0')
-      .bind(projectId, sessionId)
-      .run()
-      .catch(() => {});
-  }
+  if (!(await updateActiveActivity(db, activity))) return null;
   return activity;
+}
+
+/** Called after durable answer delivery, or canonical terminal failure, never nested errors. */
+export async function settleSlackTurnActivity(db: D1Like, env: Record<string, unknown>, input: {
+  projectId: string; conversationId: string; ackMessageTs?: string;
+  outcome: 'completed' | 'failed' | 'aborted';
+}): Promise<void> {
+  if (!input.ackMessageTs) return;
+  const sessionId = `conv:${input.conversationId}`;
+  await withSlackActivityLock(db, input.projectId, sessionId, async () => {
+    const status = input.outcome === 'completed' ? 'completed' : 'failed';
+    const existing = await loadSlackTurnActivity(db, input.projectId, sessionId);
+    if (!existing || existing.ackMessageTs !== input.ackMessageTs) return;
+    // A failed Slack edit must be repeatable after the durable activity transition.
+    const activity = existing.status === status ? existing : await completeSlackTurnActivity(
+      db, input.projectId, sessionId, status, Date.now(), input.ackMessageTs);
+    if (!activity) return;
+    const token = env[activity.transportTokenRef];
+    if (typeof token !== 'string' || !token) throw new Error(`Missing transport token env "${activity.transportTokenRef}".`);
+    await editMessage(token, activity.slackChannelId, activity.ackMessageTs,
+      status === 'completed' ? renderSlackActivityReceipt(activity) : 'This turn could not finish. Mention me again to retry.',
+      { format: false });
+  });
 }
 
 export async function shouldPostFinalBelowActivity(db: D1Like | undefined, projectId: string, sessionId: string): Promise<boolean> {
@@ -217,45 +253,61 @@ export async function postSlackActivityReceipt(env: Record<string, unknown>, act
   return true;
 }
 
-export async function handleObservedSlackActivity(event: FlueEvent, ctx: FlueContext): Promise<void> {
+export async function handleObservedSlackActivity(event: FlueEvent, ctx: FlueEventContext): Promise<void> {
   try {
     const db = (ctx.env as Record<string, unknown>).DB as D1Like | undefined;
     if (!db) return;
     if (!event.instanceId) return;
 
-    // On Flue 0.11 the conversation scope rides in the instance id (`.../conv:<id>`), not in
-    // event.session (always 'default' now). slack_turn_activity.session_id keeps storing the
-    // same `conv:...` strings as before.
-    const { projectId, slug, scope } = parseAgentInstanceId(event.instanceId);
-    if (slug !== 'default' || !scope?.startsWith('conv:')) return;
+    // Product conversation identity is stable across an operator's native instance reset.
+    const { projectId, slug, scope: instanceScope } = parseAgentInstanceId(event.instanceId);
+    if (slug !== 'default' || !instanceScope?.startsWith('conv:')) return;
+    const scope = instanceScope.replace(/~e\d+$/, '');
 
     const activityEvent = observedSlackActivityEvent(event);
     if (!activityEvent) return;
 
+    // Native progress must belong to this exact admitted receipt. Never let a late host
+    // event (including an abandoned epoch) borrow the conversation's newer acknowledgement.
+    if (!event.submissionId) return;
+    const tracker = await db.prepare(`SELECT ack_message_ts FROM slack_reply_trackers
+      WHERE instance_id=? AND submission_id=? AND ack_message_ts IS NOT NULL LIMIT 1`)
+      .bind(event.instanceId, event.submissionId).first<{ ack_message_ts: string }>();
+    if (!tracker) return;
+    const expectedAckMessageTs = tracker.ack_message_ts;
+    const activity = await loadSlackTurnActivity(db, projectId, scope);
+    if (!activity || activity.ackMessageTs !== expectedAckMessageTs) return;
+
     if ('heartbeat' in activityEvent) {
-      await recordSlackStreamHeartbeat(db, { projectId, sessionId: scope });
+      await recordSlackStreamHeartbeat(db, { projectId, sessionId: scope, expectedAckMessageTs });
       return;
     }
 
-    const base = {
-      projectId,
-      sessionId: scope,
-      isError: activityEvent.isError,
-      terminal: activityEvent.terminal,
-    };
-    const recorded =
-      'toolName' in activityEvent
-        ? await recordSlackToolActivity(db, { ...base, toolName: activityEvent.toolName })
-        : await recordSlackActivityLabel(db, {
-            ...base,
-            label: activityEvent.label,
-            forcePost: activityEvent.forcePost,
-            requireExistingActivity: activityEvent.requireExistingActivity,
-          });
-    if (!recorded?.shouldPost) return;
-    await postSlackActivityReceipt(ctx.env as Record<string, unknown>, recorded.activity).catch((e) =>
-      console.log(`[activity] receipt update failed: ${e instanceof Error ? e.message : 'error'}`),
-    );
+    await withSlackActivityLock(db, projectId, scope, async () => {
+      if (expectedAckMessageTs) {
+        const current = await loadSlackTurnActivity(db, projectId, scope);
+        if (!current || current.ackMessageTs !== expectedAckMessageTs) return;
+      }
+      const base = {
+        projectId,
+        sessionId: scope,
+        isError: activityEvent.isError,
+        terminal: activityEvent.terminal,
+      };
+      const recorded =
+        'toolName' in activityEvent
+          ? await recordSlackToolActivity(db, { ...base, toolName: activityEvent.toolName })
+          : await recordSlackActivityLabel(db, {
+              ...base,
+              label: activityEvent.label,
+              forcePost: activityEvent.forcePost,
+              requireExistingActivity: activityEvent.requireExistingActivity,
+            });
+      if (!recorded?.shouldPost) return;
+      await postSlackActivityReceipt(ctx.env as Record<string, unknown>, recorded.activity).catch((e) =>
+        console.log(`[activity] receipt update failed: ${e instanceof Error ? e.message : 'error'}`),
+      );
+    });
   } catch (e) {
     console.log(`[activity] observer ignored event: ${e instanceof Error ? e.message : 'error'}`);
   }
@@ -315,6 +367,18 @@ function formatActivityElapsed(startMs: number, endMs: number): string {
   const hours = Math.floor(elapsedMinutes / 60);
   const minutes = elapsedMinutes % 60;
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+async function updateActiveActivity(db: D1Like, activity: SlackTurnActivity): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE slack_turn_activity SET status=?, activities_json=?, last_posted_at=?, updated_at=?, completed_at=?
+       WHERE project_id=? AND session_id=? AND status='active' AND ack_message_ts=?`,
+    )
+    .bind(activity.status, JSON.stringify(activity.activities), activity.lastPostedAt, activity.updatedAt, activity.completedAt,
+      activity.projectId, activity.sessionId, activity.ackMessageTs)
+    .run() as { meta?: { changes?: number } };
+  return (result.meta?.changes ?? 0) > 0;
 }
 
 async function upsertActivity(db: D1Like, activity: SlackTurnActivity): Promise<void> {
@@ -418,142 +482,11 @@ function observedSlackActivityEvent(event: FlueEvent): ObservedSlackActivityEven
   if (event.type === 'tool' && event.isError) {
     return { toolName: event.toolName, isError: true, terminal: true };
   }
-  if (event.type === 'message_start') {
+  if (event.type === 'message_start' && event.message.role === 'assistant') {
     return { label: STREAM_RESPONSE_LABEL, requireExistingActivity: true, forcePost: true };
   }
-  if (event.type === 'text_delta' || event.type === 'thinking_delta') {
+  if (event.type === 'text_delta' || event.type === 'thinking_delta' || event.type === 'toolcall_delta') {
     return { heartbeat: true };
   }
   return null;
-}
-
-// ── Dead-turn reaper ─────────────────────────────────────────────────────────────────────────────
-// A turn that dies mid-flight (model stream drop, DO eviction) leaves its receipt 'active' forever
-// and the user staring at an eternal "⏳ Working". A live turn updates its row on every stream
-// beat/tool call, so a long-stale active row is unambiguous death. The reaper (riding the */2
-// reconcile tick) marks it failed and edits the receipt into an honest retry prompt.
-
-export const TURN_STALE_MS = 10 * 60_000; // a turn that showed life gets the long benefit of the doubt
-export const TURN_DOA_STALE_MS = 3 * 60_000; // zero beats by now = the model request never started
-export const DOA_WEDGE_THRESHOLD = 2; // consecutive dead-on-arrival turns before the session is declared wedged
-export const TURN_DIED_TEXT = '⚠️ This turn died unexpectedly — mention me again to retry.';
-export const TURN_RETRYING_TEXT = '🔁 That took longer than it should — retrying…';
-export const TURN_DIED_RESET_TEXT =
-  "⚠️ This turn died before it could start, twice in a row — I've reset this thread's session. Mention me again to retry.";
-
-export interface ReapableTurnRow {
-  projectId: string;
-  sessionId: string;
-  conversationId: string;
-  ackMessageTs: string;
-}
-
-export interface ReapStaleTurnsDeps {
-  /** Injectable for tests; defaults to the Slack chat.update helper. */
-  editMessage?: typeof editMessage;
-  /** Bump the conversation's session epoch (abandon a wedged session DO). Wired by the caller
-   *  (app.ts) to bumpAgentEpoch — injected to avoid an activity↔conversations import cycle. */
-  bumpEpoch?: (projectId: string, conversationId: string) => Promise<number>;
-  /** Re-dispatch the turn's triggering message (first-strike DOA only — a transient provider
-   *  hang self-heals without anyone retyping). Returns true when a retry was dispatched. Wired
-   *  by app.ts, which owns Flue dispatch. */
-  retryTurn?: (row: ReapableTurnRow) => Promise<boolean>;
-  log?: (message: string) => void;
-  now?: number;
-  staleMs?: number;
-  doaStaleMs?: number;
-}
-
-export async function reapStaleTurnActivities(
-  db: D1Like,
-  env: Record<string, unknown>,
-  deps: ReapStaleTurnsDeps = {},
-): Promise<number> {
-  const now = deps.now ?? Date.now();
-  const staleMs = deps.staleMs ?? TURN_STALE_MS;
-  const doaStaleMs = deps.doaStaleMs ?? TURN_DOA_STALE_MS;
-  const edit = deps.editMessage ?? editMessage;
-  const log = deps.log ?? console.log;
-
-  const { results } = await db
-    .prepare(
-      `SELECT project_id, session_id, conversation_id, slack_channel_id, ack_message_ts, transport_token_ref, activities_json, updated_at, doa_count
-         FROM slack_turn_activity WHERE status='active' AND updated_at < ?`,
-    )
-    .bind(now - doaStaleMs)
-    .all<{
-      project_id: string;
-      session_id: string;
-      conversation_id: string;
-      slack_channel_id: string;
-      ack_message_ts: string;
-      transport_token_ref: string;
-      activities_json: string;
-      updated_at: number;
-      doa_count: number | null;
-    }>();
-
-  let reaped = 0;
-  for (const row of results ?? []) {
-    const doa = parseActivities(row.activities_json).length === 0; // never even a first beat
-    if (!doa && now - row.updated_at < staleMs) continue; // mid-flight turn, still within its window
-
-    // Mark failed FIRST (guarded on status so a racing live update wins); the Slack edit is
-    // best-effort chrome — a failed edit must never leave the row eternally re-reapable.
-    const res = (await db
-      .prepare(
-        `UPDATE slack_turn_activity SET status='failed', completed_at=?, updated_at=?, doa_count=doa_count+? WHERE project_id=? AND session_id=? AND status='active'`,
-      )
-      .bind(now, now, doa ? 1 : 0, row.project_id, row.session_id)
-      .run()) as { meta?: { changes?: number } };
-    if (!(res?.meta?.changes ?? 0)) continue;
-    reaped++;
-    log(`[activity] reaped dead turn project=${row.project_id} session=${row.session_id} doa=${doa}`);
-
-    const newDoaCount = doa ? (row.doa_count ?? 0) + 1 : row.doa_count ?? 0;
-
-    // First-strike DOA: a transient provider hang — re-dispatch the triggering message once,
-    // automatically. The retried turn reuses the same ack message, so the thread reads as one
-    // evolving "retrying…" note instead of a death notice nobody asked to act on.
-    if (doa && newDoaCount === 1 && deps.retryTurn && row.conversation_id) {
-      const retried = await deps
-        .retryTurn({ projectId: row.project_id, sessionId: row.session_id, conversationId: row.conversation_id, ackMessageTs: row.ack_message_ts })
-        .catch((e) => {
-          log(`[activity] auto-retry failed: ${e instanceof Error ? e.message : 'error'}`);
-          return false;
-        });
-      if (retried) {
-        log(`[activity] auto-retry dispatched project=${row.project_id} session=${row.session_id}`);
-        const token = env[row.transport_token_ref];
-        if (typeof token === 'string' && token && row.ack_message_ts) {
-          await edit(token, row.slack_channel_id, row.ack_message_ts, TURN_RETRYING_TEXT).catch(() => {});
-        }
-        continue; // the retried turn owns the receipt now
-      }
-    }
-
-    // Two consecutive DOA turns = the session DO is wedged (poisoned history rejects every model
-    // request before its first token) — abandon it so the thread self-heals.
-    let resetSession = false;
-    if (doa && newDoaCount >= DOA_WEDGE_THRESHOLD && deps.bumpEpoch && row.conversation_id) {
-      const epoch = await deps.bumpEpoch(row.project_id, row.conversation_id).catch(() => 0);
-      if (epoch > 0) {
-        resetSession = true;
-        await db
-          .prepare('UPDATE slack_turn_activity SET doa_count=0 WHERE project_id=? AND session_id=?')
-          .bind(row.project_id, row.session_id)
-          .run()
-          .catch(() => {});
-        log(`[activity] wedged session reset project=${row.project_id} conv=${row.conversation_id} epoch=${epoch}`);
-      }
-    }
-
-    const token = env[row.transport_token_ref];
-    if (typeof token === 'string' && token && row.ack_message_ts) {
-      await edit(token, row.slack_channel_id, row.ack_message_ts, resetSession ? TURN_DIED_RESET_TEXT : TURN_DIED_TEXT).catch((e) =>
-        log(`[activity] reaper edit failed: ${e instanceof Error ? e.message : 'error'}`),
-      );
-    }
-  }
-  return reaped;
 }

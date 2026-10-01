@@ -1,6 +1,7 @@
 // Workbench M0 invariants — run: npx tsx src/workbench/workbench.test.ts
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import type { ToolDefinition } from '@flue/runtime';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import {
   claimWorkItem,
@@ -267,10 +268,10 @@ function seq() {
   };
 }
 
-function tool<T = unknown>(tools: { name: string; execute?: (args: Record<string, unknown>) => Promise<T> }[], name: string) {
+function tool(tools: ToolDefinition[], name: string) {
   const found = tools.find((t) => t.name === name);
-  assert.ok(found?.execute, `missing tool ${name}`);
-  return found.execute;
+  assert.ok(found, `missing tool ${name}`);
+  return (args: Record<string, unknown>) => invokeTool(found, args);
 }
 
 test('createWorkItem: dedupes by project dedupe key and lists project items', async () => {
@@ -365,10 +366,10 @@ test('workbenchTools expose project-scoped model tools and restrict model status
     ['create_work_item', 'get_work_item', 'list_work_items', 'update_work_item'],
   );
 
-  const create = tool<string>(tools, 'create_work_item');
-  const list = tool<string>(tools, 'list_work_items');
-  const get = tool<string>(tools, 'get_work_item');
-  const update = tool<string>(tools, 'update_work_item');
+  const create = tool(tools, 'create_work_item');
+  const list = tool(tools, 'list_work_items');
+  const get = tool(tools, 'get_work_item');
+  const update = tool(tools, 'update_work_item');
 
   const created = JSON.parse(await create({ title: 'Child task', body: 'Steps' }));
   assert.equal(created.title, 'Child task');
@@ -429,6 +430,7 @@ test('handleInternalWorkItemRequest authenticates, dedupes, and records dispatch
   assert.deepEqual(dispatched[0], {
     agent: 'project',
     id: agentInstanceId('P', `work:${first.body?.workItem.id}`),
+    idempotencyKey: `work:${first.body?.run.id}`,
     input: { kind: 'work_item', workItemId: first.body?.workItem.id, title: 'From Linear' },
   });
 

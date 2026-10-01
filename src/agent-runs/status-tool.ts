@@ -5,7 +5,7 @@
 // questions and reminder-driven follow-ups, not for re-announcing.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { getLatestAgentRunByIssueKey, listRecentAgentRuns, type AgentRun } from './repository';
 
@@ -49,11 +49,11 @@ export function checkAgentRunsTool(args: { db: D1Like; projectId: string; now?: 
       'the work is up for review. Use this when someone asks how a run is going, or after a one-shot set_reminder fires to ' +
       'follow up on a run you assigned. Milestone notifications already post to this channel automatically; do not re-announce ' +
       'what the channel has already seen. Pass issueKey to get the latest run for one issue.',
-    parameters: Type.Object({
-      issueKey: Type.Optional(Type.String({ description: 'Issue key (e.g. "WID-71") — returns that issue\'s latest run only.' })),
-      limit: Type.Optional(Type.Number({ description: `How many recent runs to list (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).` })),
+    input: v.object({
+      issueKey: v.optional(v.pipe(v.string(), v.description('Issue key (e.g. "WID-71") — returns that issue\'s latest run only.'))),
+      limit: v.optional(v.pipe(v.number(), v.description(`How many recent runs to list (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).`))),
     }),
-    async execute({ issueKey, limit }) {
+    async run({ data: { issueKey, limit } }) {
       const t = now();
       const key = typeof issueKey === 'string' ? issueKey.trim() : '';
       if (key) {

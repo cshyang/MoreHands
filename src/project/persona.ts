@@ -11,7 +11,7 @@
 // helper emits exactly one.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 
 export interface Persona {
@@ -92,19 +92,12 @@ export function personaTools(db: D1Like | undefined, projectId: string): ToolDef
       '"https://api.dicebear.com/9.x/thumbs/png?seed=<YourName>" — deterministic per seed, no hosting). ' +
       'Each call replaces the whole identity, so include the avatar every time. People still summon you ' +
       'by @mentioning the app (that handle never changes); this only controls how your posts render.',
-    parameters: Type.Object({
-      name: Type.String({ description: 'Display name, e.g. "Wren". Short — it appears on every message.' }),
-      iconEmoji: Type.Optional(
-        Type.String({ description: 'Emoji avatar in Slack syntax, e.g. ":owl:". Wins over iconUrl if both are set.' }),
-      ),
-      iconUrl: Type.Optional(
-        Type.String({
-          description:
-            'Image avatar: public https PNG/JPG URL, e.g. "https://api.dicebear.com/9.x/thumbs/png?seed=Wren".',
-        }),
-      ),
+    input: v.object({
+      name: v.pipe(v.string(), v.description('Display name, e.g. "Wren". Short — it appears on every message.')),
+      iconEmoji: v.optional(v.pipe(v.string(), v.description('Emoji avatar in Slack syntax, e.g. ":owl:". Wins over iconUrl if both are set.'))),
+      iconUrl: v.optional(v.pipe(v.string(), v.description('Image avatar: public https PNG/JPG URL, e.g. "https://api.dicebear.com/9.x/thumbs/png?seed=Wren".'))),
     }),
-    async execute({ name, iconEmoji, iconUrl }) {
+    async run({ data: { name, iconEmoji, iconUrl } }) {
       const p = await setPersona(store(), projectId, {
         name: String(name),
         iconEmoji: iconEmoji ? String(iconEmoji) : null,

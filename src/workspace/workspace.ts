@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { byteLength, redactSecrets, safeJson, truncateToBytes } from '../shared/bounded';
 import { withWallClock } from '../shared/wall-clock';
@@ -247,13 +247,13 @@ export function workspaceTools(args: {
       name: 'workspace_exec',
       description:
         'Run a shell command in this project\'s sandbox container (Ubuntu with git, node, python3 + pandas/numpy). Use for files, spreadsheets, and multi-step data work; use execute_code for small pure functions instead. Working dir defaults to /workspace. The filesystem is EPHEMERAL: the container sleeps after ~10 idle minutes and loses all files, so verify inputs exist before reusing prior state. First command after idle pays a ~6s container start.',
-      parameters: Type.Object({
-        command: Type.String({ description: 'Shell command to run (bash -c semantics).' }),
-        timeoutMs: Type.Optional(Type.Number({ description: 'Timeout in ms. Default 60000, hard cap 300000.' })),
-        cwd: Type.Optional(Type.String({ description: 'Working directory. Defaults to /workspace.' })),
-        conversationId: Type.Optional(Type.String({ description: 'Copy from the current Dispatch Input when available.' })),
+      input: v.object({
+        command: v.pipe(v.string(), v.description('Shell command to run (bash -c semantics).')),
+        timeoutMs: v.optional(v.pipe(v.number(), v.description('Timeout in ms. Default 60000, hard cap 300000.'))),
+        cwd: v.optional(v.pipe(v.string(), v.description('Working directory. Defaults to /workspace.'))),
+        conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input when available.'))),
       }),
-      async execute(params) {
+      async run({ data: params }) {
         return safeJson(await workspaceExec(deps, params as { command: string; timeoutMs?: number; cwd?: string; conversationId?: string }));
       },
     }),
@@ -261,12 +261,12 @@ export function workspaceTools(args: {
       name: 'workspace_write_file',
       description:
         'Write a text file into the project sandbox container (e.g. a script to run with workspace_exec). Content is capped (~1MB).',
-      parameters: Type.Object({
-        path: Type.String({ description: 'Absolute path inside the container, e.g. /workspace/script.py.' }),
-        content: Type.String({ description: 'Full file content (text).' }),
-        conversationId: Type.Optional(Type.String({ description: 'Copy from the current Dispatch Input when available.' })),
+      input: v.object({
+        path: v.pipe(v.string(), v.description('Absolute path inside the container, e.g. /workspace/script.py.')),
+        content: v.pipe(v.string(), v.description('Full file content (text).')),
+        conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input when available.'))),
       }),
-      async execute(params) {
+      async run({ data: params }) {
         return safeJson(await workspaceWriteFile(deps, params as { path: string; content: string; conversationId?: string }));
       },
     }),
@@ -274,12 +274,12 @@ export function workspaceTools(args: {
       name: 'workspace_read_file',
       description:
         'Read a text file from the project sandbox container into the conversation. Output is capped (~1MB, truncated flag set); for large results prefer summarizing via workspace_exec.',
-      parameters: Type.Object({
-        path: Type.String({ description: 'Absolute path inside the container.' }),
-        maxBytes: Type.Optional(Type.Number({ description: 'Optional tighter cap on returned bytes.' })),
-        conversationId: Type.Optional(Type.String({ description: 'Copy from the current Dispatch Input when available.' })),
+      input: v.object({
+        path: v.pipe(v.string(), v.description('Absolute path inside the container.')),
+        maxBytes: v.optional(v.pipe(v.number(), v.description('Optional tighter cap on returned bytes.'))),
+        conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input when available.'))),
       }),
-      async execute(params) {
+      async run({ data: params }) {
         return safeJson(await workspaceReadFile(deps, params as { path: string; maxBytes?: number; conversationId?: string }));
       },
     }),

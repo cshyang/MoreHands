@@ -6,7 +6,7 @@
 // you most need to see.
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import { recordToolCall, sanitizePath, toolCallRecorder, type ToolCallRecord } from './audit';
 import { genericApiTool, PROVIDER_API_PROFILES } from '../providers/generic-api';
 import { githubReadTools } from '../providers/github';
@@ -103,7 +103,7 @@ test('success: a 200 call records {provider, method, path, success, duration}', 
   const { records, record } = collectingRecorder();
   const tool = githubTool(record);
   await withFetch(async () => new Response('{"ok":true}', { status: 200 }), async () => {
-    await (tool.execute as (a: unknown) => Promise<unknown>)({ method: 'GET', path: '/repos/o/r/issues' });
+    await invokeTool(tool, { method: 'GET', path: '/repos/o/r/issues' });
   });
   assert.equal(records.length, 1);
   assert.deepEqual(
@@ -117,7 +117,7 @@ test('http_error: a non-ok response records http_error AND still throws to the m
   const { records, record } = collectingRecorder();
   const tool = githubTool(record);
   await withFetch(async () => new Response('{"message":"Not Found"}', { status: 404 }), async () => {
-    await assert.rejects(() => (tool.execute as (a: unknown) => Promise<unknown>)({ method: 'GET', path: '/repos/o/r/nope' }), /404/);
+    await assert.rejects(() => invokeTool(tool, { method: 'GET', path: '/repos/o/r/nope' }), /404/);
   });
   assert.equal(records.length, 1);
   assert.equal(records[0].status, 'http_error');
@@ -131,7 +131,7 @@ test('fetch_error: a network failure/timeout records fetch_error AND still throw
       throw new Error('socket hang up');
     },
     async () => {
-      await assert.rejects(() => (tool.execute as (a: unknown) => Promise<unknown>)({ method: 'GET', path: '/repos/o/r/issues' }), /failed/);
+      await assert.rejects(() => invokeTool(tool, { method: 'GET', path: '/repos/o/r/issues' }), /failed/);
     },
   );
   assert.equal(records.length, 1);
@@ -141,7 +141,7 @@ test('fetch_error: a network failure/timeout records fetch_error AND still throw
 test('blocked: a method-policy refusal records blocked — injection probes leave a trace', async () => {
   const { records, record } = collectingRecorder();
   const tool = githubTool(record); // github profile is get-only
-  await assert.rejects(() => (tool.execute as (a: unknown) => Promise<unknown>)({ method: 'DELETE', path: '/repos/o/r' }), /Only GET/);
+  await assert.rejects(() => invokeTool(tool, { method: 'DELETE', path: '/repos/o/r' }), /Only GET/);
   assert.equal(records.length, 1);
   assert.equal(records[0].status, 'blocked');
   assert.equal(records[0].method, 'DELETE');
@@ -150,7 +150,7 @@ test('blocked: a method-policy refusal records blocked — injection probes leav
 test('no recorder wired → calls behave exactly as before (audit is optional)', async () => {
   const tool = genericApiTool(PROVIDER_API_PROFILES.github, 'ghp_token', {});
   await withFetch(async () => new Response('{}', { status: 200 }), async () => {
-    const out = await (tool.execute as (a: unknown) => Promise<unknown>)({ method: 'GET', path: '/repos/o/r' });
+    const out = await invokeTool(tool, { method: 'GET', path: '/repos/o/r' });
     assert.equal(out, '{}');
   });
 });
@@ -162,7 +162,7 @@ test('github typed tools: a successful read records through ghGet', async () => 
   const tools = githubReadTools('ghp_token', 'o/r', record);
   const getIssue = tools.find((t) => t.name === 'github_get_issue')!;
   await withFetch(async () => new Response('{"number":7,"title":"t"}', { status: 200 }), async () => {
-    await (getIssue.execute as (a: unknown) => Promise<unknown>)({ number: 7 });
+    await invokeTool(getIssue, { number: 7 });
   });
   assert.equal(records.length, 1);
   assert.equal(records[0].provider, 'github');
@@ -176,7 +176,7 @@ test('github typed tools: an upstream 404 records http_error AND still throws', 
   const tools = githubReadTools('ghp_token', 'o/r', record);
   const getIssue = tools.find((t) => t.name === 'github_get_issue')!;
   await withFetch(async () => new Response('{"message":"Not Found"}', { status: 404 }), async () => {
-    await assert.rejects(() => (getIssue.execute as (a: unknown) => Promise<unknown>)({ number: 999 }), /404/);
+    await assert.rejects(() => invokeTool(getIssue, { number: 999 }), /404/);
   });
   assert.equal(records.length, 1);
   assert.equal(records[0].status, 'http_error');
@@ -206,7 +206,7 @@ test('runtime wiring: a call through a runtime-built tool lands an audit row in 
   });
   const callApi = runtime.tools.find((t) => t.name === 'github_call_api')!;
   await withFetch(async () => new Response('{}', { status: 200 }), async () => {
-    await (callApi.execute as (a: unknown) => Promise<unknown>)({ method: 'GET', path: '/repos/o/r/issues?state=open' });
+    await invokeTool(callApi, { method: 'GET', path: '/repos/o/r/issues?state=open' });
   });
   await settle();
   const auditWrites = db.writes.filter((w) => w.sql.includes('tool_calls'));

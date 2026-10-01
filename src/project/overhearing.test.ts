@@ -1,7 +1,7 @@
 // set_overhearing tool invariants — run: npx tsx src/project/overhearing.test.ts
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import { overhearingTools } from './overhearing';
 import type { D1Like } from '../skills/repository';
 
@@ -31,7 +31,7 @@ test('overhearingTools: gated off without a db', () => {
 test('set_overhearing enabled=true writes overhear=1 for this project and confirms ON', async () => {
   const db = new FakeD1();
   const [tool] = overhearingTools(db, 'C_OH');
-  const out = await tool.execute({ enabled: true });
+  const out = await invokeTool(tool, { enabled: true });
   assert.deepEqual(db.updates, [{ overhear: 1, projectId: 'C_OH' }]);
   assert.match(String(out), /ON for this channel/);
 });
@@ -39,9 +39,16 @@ test('set_overhearing enabled=true writes overhear=1 for this project and confir
 test('set_overhearing enabled=false writes overhear=0 and confirms OFF', async () => {
   const db = new FakeD1();
   const [tool] = overhearingTools(db, 'C_OH');
-  const out = await tool.execute({ enabled: false });
+  const out = await invokeTool(tool, { enabled: false });
   assert.deepEqual(db.updates, [{ overhear: 0, projectId: 'C_OH' }]);
   assert.match(String(out), /OFF for this channel/);
+});
+
+test('set_overhearing input rejects non-booleans before changing the binding', async () => {
+  const db = new FakeD1();
+  const [tool] = overhearingTools(db, 'C_OH');
+  await assert.rejects(invokeTool(tool, { enabled: 'true' }), /boolean/i);
+  assert.deepEqual(db.updates, []);
 });
 
 await run();

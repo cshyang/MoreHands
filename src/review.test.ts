@@ -1,7 +1,7 @@
 // Proactive review (Layer 4) invariants — run: npx tsx src/review.test.ts
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from './shared/test-utils';
+import { createTestRunner, invokeTool } from './shared/test-utils';
 import {
   isReviewCandidate,
   isTrivialChatter,
@@ -301,7 +301,7 @@ test('proactive_reply: shadow mode logs the draft, posts nothing, spends no budg
   const sent: Array<{ target: ConversationTarget; text: string }> = [];
   const logs: string[] = [];
   const tool = makeTool(db, undefined, sent, logs);
-  const out = await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'the runbook is at /docs' });
+  const out = await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'the runbook is at /docs' });
   assert.match(String(out), /shadow/);
   assert.equal(sent.length, 0);
   assert.equal(db.state.get('P1'), undefined);
@@ -312,12 +312,12 @@ test('proactive_reply: live mode posts into the thread and consumes the right bu
   const db = new FakeD1();
   const sent: Array<{ target: ConversationTarget; text: string }> = [];
   const tool = makeTool(db, 'live', sent);
-  await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'answer + receipt' });
+  await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'answer + receipt' });
   assert.equal(sent[0].target.externalConversationId, '9.0');
   assert.equal(db.stateFor('P1').answer_posts_today, 1);
   assert.equal(db.stateFor('P1').last_observation_post_at, null, 'answer budget consumed, not observation');
 
-  await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'observation', text: 'related thread' });
+  await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'observation', text: 'related thread' });
   assert.equal(db.stateFor('P1').last_observation_post_at, NOW);
 });
 
@@ -328,7 +328,7 @@ test('proactive_reply: the budget-spending reply tacks on a quiet "last for toda
   s.answer_posts_day = '2026-06-11';
   const sent: Array<{ target: ConversationTarget; text: string }> = [];
   const tool = makeTool(db, 'live', sent);
-  await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'the runbook is at /docs' });
+  await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'the runbook is at /docs' });
   assert.equal(sent.length, 1);
   assert.match(sent[0].text, /the runbook is at \/docs/);
   assert.match(sent[0].text, /last unprompted reply for today/);
@@ -339,7 +339,7 @@ test('proactive_reply: a non-final reply carries no heads-up', async () => {
   const db = new FakeD1();
   const sent: Array<{ target: ConversationTarget; text: string }> = [];
   const tool = makeTool(db, 'live', sent); // empty budget state → plenty remaining
-  await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'plain answer' });
+  await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'plain answer' });
   assert.equal(sent[0].text, 'plain answer');
 });
 
@@ -350,7 +350,7 @@ test('proactive_reply: refuses when the budget is spent', async () => {
   s.answer_posts_day = '2026-06-11';
   const sent: Array<{ target: ConversationTarget; text: string }> = [];
   const tool = makeTool(db, 'live', sent);
-  const out = await tool.execute({ conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'x'.repeat(20) });
+  const out = await invokeTool(tool, { conversationId: 'slack:T1:C1:9.0', kind: 'answer', text: 'x'.repeat(20) });
   assert.match(String(out), /budget.*spent/);
   assert.equal(sent.length, 0);
 });
@@ -358,7 +358,7 @@ test('proactive_reply: refuses when the budget is spent', async () => {
 test('proactive_reply: refuses a conversationId outside this channel', async () => {
   const db = new FakeD1();
   const tool = makeTool(db, 'live', []);
-  await assert.rejects(() => tool.execute({ conversationId: 'slack:T1:C_EVIL:9.0', kind: 'answer', text: 'leak attempt' }), /does not belong/);
+  await assert.rejects(() => invokeTool(tool, { conversationId: 'slack:T1:C_EVIL:9.0', kind: 'answer', text: 'leak attempt' }), /does not belong/);
 });
 
 void run();

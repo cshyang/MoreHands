@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import type { ToolDefinition } from '@flue/runtime';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import { buildSelfStatus, selfStatusTool } from './self';
 
 const { test, run } = createTestRunner();
 
 const invoke = (tool: ToolDefinition) =>
-  (tool as { execute: (args: Record<string, unknown>) => Promise<string> }).execute({});
+  invokeTool(tool, {});
 
 test('buildSelfStatus reports the live runtime manifest without exposing connection config values', () => {
   const status = buildSelfStatus({
@@ -40,6 +40,12 @@ test('buildSelfStatus reports the live runtime manifest without exposing connect
     substrate: 'cloudflare_durable_object',
     model: 'gpt-test',
   });
+  assert.equal(status.capabilities.reply.enabled, true);
+  assert.deepEqual(status.capabilities.reply.tools, []);
+  assert.match(status.capabilities.reply.note, /Plain final text is delivered automatically/);
+  assert.doesNotMatch(status.capabilities.reply.note, /discarded/);
+  assert.equal(status.capabilities.status.enabled, true);
+  assert.deepEqual(status.capabilities.status.tools, ['update_status']);
   assert.equal(status.capabilities.skills.enabled, true);
   // Reminders are gated on DB only since the D1 store replaced the ticker's SchedulerDO.
   assert.equal(status.capabilities.reminders.enabled, true);
@@ -90,6 +96,7 @@ test('self_status tool returns the manifest as formatted JSON', async () => {
   const tool = selfStatusTool({
     projectId: 'P',
     agentSlug: 'helper',
+    engaged: false,
     model: 'gpt-test',
     hasDb: true,
     hasBotToken: false,
@@ -108,6 +115,12 @@ test('self_status tool returns the manifest as formatted JSON', async () => {
 
   const parsed = JSON.parse(await invoke(tool));
   assert.equal(parsed.identity.projectId, 'P');
+  assert.equal(parsed.capabilities.reply.enabled, true);
+  assert.deepEqual(parsed.capabilities.reply.tools, ['reply_to_conversation']);
+  assert.match(parsed.capabilities.reply.note, /Autonomous turns have no automatic reply destination/);
+  assert.match(parsed.capabilities.reply.note, /explicit conversationId/);
+  assert.equal(parsed.capabilities.status.enabled, false);
+  assert.deepEqual(parsed.capabilities.status.tools, []);
   assert.equal(parsed.capabilities.memory.enabled, true);
   assert.equal(parsed.capabilities.reminders.enabled, true);
   assert.equal(parsed.capabilities.sourceEvolution.enabled, true);

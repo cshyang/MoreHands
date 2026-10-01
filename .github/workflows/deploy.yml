@@ -56,9 +56,9 @@ jobs:
           echo "No pending migrations."
 
       # ── Build + deploy ───────────────────────────────────────────────────────
-      # (The hatchery-ticker worker is retired — Flue 0.11 hosts the cron in-Worker.)
+      # (The hatchery-ticker worker is retired — src/cloudflare.ts hosts the cron in-Worker.)
       - name: Build (Flue → Cloudflare)
-        run: npx flue build --target cloudflare
+        run: npm run build
       - name: Deploy hatchery
         run: |
           set -o pipefail   # else `| tee` swallows wrangler's exit code → a failed deploy looks green

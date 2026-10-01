@@ -7,7 +7,7 @@
 // (see connections/tools.ts → connectionTools), so the model never reaches a write directly.
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import { fetchWithTimeout, jsonMessageOrText } from './http';
 import type { ToolCallRecorder, ToolCallStatus } from '../connections/audit';
 
@@ -81,12 +81,12 @@ export function githubReadTools(pat: string, repo: string | undefined, audit?: T
   const listIssues = defineTool({
     name: 'github_list_issues',
     description: `List open issues in a GitHub repo (most-recently-updated first).${repoHint}`,
-    parameters: Type.Object({
-      owner: Type.Optional(Type.String({ description: 'Repo owner/org.' })),
-      repo: Type.Optional(Type.String({ description: 'Repo name.' })),
-      state: Type.Optional(Type.String({ description: '"open" (default), "closed", or "all".' })),
+    input: v.object({
+      owner: v.optional(v.pipe(v.string(), v.description('Repo owner/org.'))),
+      repo: v.optional(v.pipe(v.string(), v.description('Repo name.'))),
+      state: v.optional(v.pipe(v.string(), v.description('"open" (default), "closed", or "all".'))),
     }),
-    async execute({ owner, repo: r, state }) {
+    async run({ data: { owner, repo: r, state } }) {
       const { owner: o, name: n } = resolveRepo(owner as string | undefined, r as string | undefined);
       const st = ['open', 'closed', 'all'].includes(String(state)) ? String(state) : 'open';
       const data = (await ghGet(pat, audit, `/repos/${o}/${n}/issues?state=${st}&sort=updated&per_page=20`)) as Record<
@@ -102,12 +102,12 @@ export function githubReadTools(pat: string, repo: string | undefined, audit?: T
   const getIssue = defineTool({
     name: 'github_get_issue',
     description: `Get one GitHub issue by number, with its body.${repoHint}`,
-    parameters: Type.Object({
-      number: Type.Integer({ description: 'Issue number.' }),
-      owner: Type.Optional(Type.String({ description: 'Repo owner/org.' })),
-      repo: Type.Optional(Type.String({ description: 'Repo name.' })),
+    input: v.object({
+      number: v.pipe(v.number(), v.integer(), v.description('Issue number.')),
+      owner: v.optional(v.pipe(v.string(), v.description('Repo owner/org.'))),
+      repo: v.optional(v.pipe(v.string(), v.description('Repo name.'))),
     }),
-    async execute({ number, owner, repo: r }) {
+    async run({ data: { number, owner, repo: r } }) {
       const { owner: o, name: n } = resolveRepo(owner as string | undefined, r as string | undefined);
       const i = (await ghGet(pat, audit, `/repos/${o}/${n}/issues/${Number(number)}`)) as Record<string, unknown>;
       return JSON.stringify({ ...slimIssue(i), body: i.body }, null, 2);
@@ -118,8 +118,8 @@ export function githubReadTools(pat: string, repo: string | undefined, audit?: T
     name: 'github_search_issues',
     description:
       'Search GitHub issues/PRs with the GitHub search syntax (e.g. "repo:owner/name is:issue is:open label:bug").',
-    parameters: Type.Object({ q: Type.String({ description: 'GitHub issue-search query.' }) }),
-    async execute({ q }) {
+    input: v.object({ q: v.pipe(v.string(), v.description('GitHub issue-search query.')) }),
+    async run({ data: { q } }) {
       const data = (await ghGet(pat, audit, `/search/issues?q=${encodeURIComponent(String(q))}&per_page=20`)) as {
         total_count: number;
         items: Record<string, unknown>[];
@@ -131,8 +131,8 @@ export function githubReadTools(pat: string, repo: string | undefined, audit?: T
   const searchCode = defineTool({
     name: 'github_search_code',
     description: 'Search code with the GitHub code-search syntax (e.g. "repo:owner/name connectMcpServer").',
-    parameters: Type.Object({ q: Type.String({ description: 'GitHub code-search query.' }) }),
-    async execute({ q }) {
+    input: v.object({ q: v.pipe(v.string(), v.description('GitHub code-search query.')) }),
+    async run({ data: { q } }) {
       const data = (await ghGet(pat, audit, `/search/code?q=${encodeURIComponent(String(q))}&per_page=20`)) as {
         total_count: number;
         items: { path?: string; repository?: { full_name?: string }; html_url?: string }[];
@@ -145,13 +145,13 @@ export function githubReadTools(pat: string, repo: string | undefined, audit?: T
   const getFile = defineTool({
     name: 'github_get_file_contents',
     description: `Read a file's text from a GitHub repo at a path (optionally a ref/branch).${repoHint}`,
-    parameters: Type.Object({
-      path: Type.String({ description: 'File path in the repo.' }),
-      owner: Type.Optional(Type.String({ description: 'Repo owner/org.' })),
-      repo: Type.Optional(Type.String({ description: 'Repo name.' })),
-      ref: Type.Optional(Type.String({ description: 'Branch, tag, or commit SHA.' })),
+    input: v.object({
+      path: v.pipe(v.string(), v.description('File path in the repo.')),
+      owner: v.optional(v.pipe(v.string(), v.description('Repo owner/org.'))),
+      repo: v.optional(v.pipe(v.string(), v.description('Repo name.'))),
+      ref: v.optional(v.pipe(v.string(), v.description('Branch, tag, or commit SHA.'))),
     }),
-    async execute({ path, owner, repo: r, ref }) {
+    async run({ data: { path, owner, repo: r, ref } }) {
       const { owner: o, name: n } = resolveRepo(owner as string | undefined, r as string | undefined);
       const q = ref ? `?ref=${encodeURIComponent(String(ref))}` : '';
       const data = (await ghGet(pat, audit, `/repos/${o}/${n}/contents/${String(path)}${q}`)) as {

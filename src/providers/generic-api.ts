@@ -15,7 +15,7 @@
 //      tool DESCRIPTION (loads only when the tool exists, right where the model decides to call).
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import { fetchWithTimeout, jsonMessageOrText } from './http';
 import type { ToolCallRecorder, ToolCallStatus } from '../connections/audit';
 
@@ -184,14 +184,12 @@ export function genericApiTool(
       'path is the API path after the base origin, beginning with "/", including any query string. ' +
       'Authentication is handled for you — never include tokens. ' +
       profile.crib(config),
-    parameters: Type.Object({
-      method: Type.String({ description: getOnly ? 'HTTP method. Only "GET" is permitted right now.' : 'HTTP method (GET, POST, …).' }),
-      path: Type.String({ description: 'API path beginning with "/", including any query string.' }),
-      body: Type.Optional(
-        Type.String({ description: 'Request body as a JSON string, for non-GET calls (e.g. a Notion query filter). Omit for GET.' }),
-      ),
+    input: v.object({
+      method: v.pipe(v.string(), v.description(getOnly ? 'HTTP method. Only "GET" is permitted right now.' : 'HTTP method (GET, POST, …).')),
+      path: v.pipe(v.string(), v.description('API path beginning with "/", including any query string.')),
+      body: v.optional(v.pipe(v.string(), v.description('Request body as a JSON string, for non-GET calls (e.g. a Notion query filter). Omit for GET.'))),
     }),
-    async execute({ method, path, body }) {
+    async run({ data: { method, path, body } }) {
       const m = String(method).toUpperCase();
       const p = String(path).startsWith('/') ? String(path) : `/${String(path)}`;
       if (getOnly && m !== 'GET') {

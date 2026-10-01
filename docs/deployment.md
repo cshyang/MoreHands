@@ -13,13 +13,13 @@ merge, or production deploy authority.
 
 ## Prerequisites
 
-- Node `>=22.18`. Flue `0.11` rejects older Node versions.
-- `npm install`
+- Node `>=22.18`.
+- `npm ci`
 - Cloudflare account + Wrangler auth.
 - Trigger.dev project and secret key.
-- OpenRouter key — the ONE model credential: the Worker agent (Flue runs
-  `openrouter/xiaomi/mimo-v2.5-pro` inside the DO) and the Pi runner (both kits) all route
-  through OpenRouter.
+- `ZAI_API_KEY` for the Flue 2 Worker default, `zai/glm-5.3-flash`.
+  The legacy `ZAI_CODING_API_KEY` is accepted as a migration alias.
+- `OPENROUTER_API_KEY` for the separate Pi runner and any explicitly pinned OpenRouter model.
 - Slack, Nango, Linear, and GitHub access for the workspace you are wiring.
 
 ## Cloudflare Setup
@@ -70,7 +70,8 @@ Everything account-specific lives in `.env.deploy` and is pushed as Worker secre
 
 | Secret / var | Worker | Required for |
 |---|---|---|
-| `OPENROUTER_API_KEY` | hatchery | model turns inside the Cloudflare agent |
+| `ZAI_API_KEY` | hatchery | default `zai/glm-5.3-flash` model turns (legacy `ZAI_CODING_API_KEY` alias accepted) |
+| `OPENROUTER_API_KEY` | hatchery | explicitly pinned OpenRouter model turns |
 | `HEARTBEAT_TOKEN` | hatchery | guards the internal cron-fired routes |
 | `SLACK_SIGNING_SECRET` | hatchery | `/slack/events` verification |
 | `SLACK_BOT_TOKEN_DEFAULT` | hatchery | Slack replies |
@@ -91,6 +92,39 @@ Everything account-specific lives in `.env.deploy` and is pushed as Worker secre
 
 `RUNNER_GITHUB_PAT_TEMP` is a stopgap. Production should replace it with a GitHub App installation
 token minted per repo/run.
+
+## Flue 2 cutover
+
+A local merge is not a deployment. Review and run this checklist separately:
+
+1. Pause ingress and let current turns finish before deploying. Inspect the old `pending_messages`
+   table and drain all `status='pending'` rows through the old Worker before cutover. The new Worker
+   no longer parks or sweeps these messages. Keep the table for inspection; dropping it needs separate
+   authorization. Do not move active beta turns across the incompatible Flue state format.
+2. Back up D1, then apply new migrations before enabling the new Worker. Never edit applied migration files.
+3. Set `ZAI_API_KEY` (or the legacy `ZAI_CODING_API_KEY`) and retain `HEARTBEAT_TOKEN`:
+   reminders, reflection, review, and reconciliation still use guarded internal routes.
+4. Build with `npm run build`; inspect `dist/hatchery/wrangler.json` and run Wrangler's deploy
+   dry-run. Keep `Project` / `FlueProjectAgent` / `FLUE_PROJECT_AGENT` names. The instance generation
+   increments to start fresh Flue conversations; D1 memories, transcripts, skills, and targets survive.
+5. Deploy only after explicit authorization. The six-hour generic heartbeat is removed; the
+   minute reminder scan, nightly reflection, and reconciliation clock remain.
+6. Canary one channel with `zai/glm-5.3-flash`: single message, joined burst, lookup tool,
+   attachment authorization, quiet background run, and restart during delivery.
+7. Inspect `slack_reply_outbox`. `uncertain` means a new post may have succeeded but cannot
+   be positively matched by its Slack metadata. Do not reset it to pending blindly. A confirmed
+   history match repairs delivery; an unresolved row needs operator inspection.
+
+Flue's native history is the answer source. One isolated adapter reads pinned Flue 2.2.2
+canonical records and admission metadata; upgrade it only with compatibility tests. Admission
+metadata heals a lost dispatch receipt even before canonical input exists. An unclaimable native
+submission with no canonical outcome closes visibly as failed, never with a fabricated answer.
+The external outbox stores only delivery parts.
+Engaged answers post below the working acknowledgement so a late progress edit cannot erase an answer.
+The retired `FlueRegistry` class remains exported without a binding or storage changes, preserving its
+historical namespace. New posts cannot be claimed exactly-once. Slack history
+access and returned message metadata are needed to reconcile a lost post response. No absence
+of a history match is treated as proof that a post was never accepted.
 
 ## Trigger.dev Runner
 

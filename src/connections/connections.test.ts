@@ -6,7 +6,8 @@
 // and the D1 metadata layer (operator add without redeploy).
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import * as v from 'valibot';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import {
   connectionState,
   resolveConnection,
@@ -157,7 +158,7 @@ test('github_call_api refuses non-GET (writes go through the approval gate, not 
   const creds = resolveConnection(GEN, env, 'github')!;
   const [callApi] = connectionTools(connectionState(GEN, env), { github: creds });
   await assert.rejects(
-    () => (callApi.execute as (a: unknown) => Promise<unknown>)({ method: 'POST', path: '/repos/o/r/issues' }),
+    () => invokeTool(callApi, { method: 'POST', path: '/repos/o/r/issues' }),
     /Only GET is allowed/,
   );
 });
@@ -178,7 +179,7 @@ test('notion_call_api allows POST (reads use POST; token is read-only at the pro
   const [callApi] = connectionTools(connectionState(NO, env), { notion: creds });
   await assert.doesNotReject(async () => {
     try {
-      await (callApi.execute as (a: unknown) => Promise<unknown>)({ method: 'POST', path: '/v1/search', body: '{}' });
+      await invokeTool(callApi, { method: 'POST', path: '/v1/search', body: '{}' });
     } catch (e) {
       if (/Only GET is allowed/.test((e as Error).message)) throw e; // a network/auth error is fine; a method-gate refusal is not
     }
@@ -380,7 +381,7 @@ test('resolveProviderToken: null when the provider is not connected', async () =
   assert.equal(await resolveProviderToken(undefined, binding([]), {}, 'github'), null);
 });
 
-test('a Nango-backed notion connection builds notion_call_api whose execute resolves the lazy token', async () => {
+test('a Nango-backed notion connection builds notion_call_api whose run resolves the lazy token', async () => {
   let fetchCount = 0;
   const fakeFetchToken = async () => { fetchCount++; return 'live_notion_at'; };
   const specs: ConnectionSpec[] = [{ provider: 'notion', connectionRef: 'conn_42', config: {} }];
@@ -389,21 +390,21 @@ test('a Nango-backed notion connection builds notion_call_api whose execute reso
   const tools = connectionTools(connectionState(specs, env), { notion: creds });
   assert.deepEqual(tools.map((t) => t.name), ['notion_call_api'], 'connected Nango notion exposes the generic call tool');
   assert.equal(fetchCount, 0, 'building the tool must not fetch a token');
-  // execute resolves the lazy token (a network error after that is fine; a method-gate refusal is not).
+  // run resolves the lazy token (a network error after that is fine; a method-gate refusal is not).
   await assert.doesNotReject(async () => {
     try {
-      await (tools[0].execute as (a: unknown) => Promise<unknown>)({ method: 'POST', path: '/v1/search', body: '{}' });
+      await invokeTool(tools[0], { method: 'POST', path: '/v1/search', body: '{}' });
     } catch (e) {
       if (/Only GET is allowed/.test((e as Error).message)) throw e;
     }
   });
-  assert.ok(fetchCount >= 1, 'execute resolved the lazy token at least once');
+  assert.ok(fetchCount >= 1, 'run resolved the lazy token at least once');
 });
 
 test('request_connection: schema has setup metadata but NO secret/token parameter (the structural wall)', async () => {
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' });
   assert.equal(tool.name, 'request_connection');
-  const props = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+  const props = (tool.input as v.ObjectSchema<v.ObjectEntries, undefined>).entries;
   const keys = Object.keys(props);
   assert.deepEqual(keys, ['provider', 'authMode', 'repo', 'conversationId'], 'metadata only — no secret/token field exists');
   for (const k of keys) assert.ok(!/secret|token|key|credential/i.test(k), `no credential-shaped param (${k})`);
@@ -416,7 +417,7 @@ test('request_connection: starts a session bound to the channel (end_user_id = p
     return { connectLink: 'https://connect.nango.dev/xyz', token: 't', expiresAt: 'e' };
   };
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' }, { startConnectSession: fakeStart });
-  const out = (await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion' }));
+  const out = (await invokeTool(tool, { provider: 'notion' }));
   assert.match(out, /https:\/\/connect\.nango\.dev\/xyz/);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0], {
@@ -437,7 +438,7 @@ test('request_connection: a catalog provider whose integration key is NOT enable
       },
     },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'oauth' });
+  const out = await invokeTool(tool, { provider: 'github', authMode: 'oauth' });
   assert.match(out, /not enabled|isn't enabled/i, 'explains the integration is missing instead of a raw 400');
   assert.match(out, /github-app/, 'tells the agent which github integrations ARE enabled so it can fall back');
   assert.doesNotMatch(out, /https:\/\//, 'no link minted');
@@ -449,7 +450,7 @@ test('request_connection: a catalog provider whose key IS enabled proceeds norma
     { nangoSecretKey: 'nk', projectId: 'C123', enabledIntegrationKeys: ['github-app-oauth', 'notion'] },
     { startConnectSession: async () => ({ connectLink: 'https://connect.nango.dev/app', token: 't', expiresAt: 'e' }) },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'app' });
+  const out = await invokeTool(tool, { provider: 'github', authMode: 'app' });
   assert.match(out, /connect\.nango\.dev\/app/, 'an enabled key mints the link as before');
 });
 
@@ -459,7 +460,7 @@ test('request_connection: validation is skipped when the enabled list is unknown
     { nangoSecretKey: 'nk', projectId: 'C123' },
     { startConnectSession: async () => ({ connectLink: 'https://connect.nango.dev/xyz', token: 't', expiresAt: 'e' }) },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion' });
+  const out = await invokeTool(tool, { provider: 'notion' });
   assert.match(out, /connect\.nango\.dev\/xyz/);
 });
 
@@ -480,7 +481,7 @@ test('request_connection: with a thread poster, the high-entropy link goes to Sl
       },
     },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion', conversationId: 'slack:T:C:1.0' });
+  const out = await invokeTool(tool, { provider: 'notion', conversationId: 'slack:T:C:1.0' });
   // The link (the thing the model would otherwise stall reproducing token-by-token) is posted to Slack…
   assert.equal(posted.length, 1);
   assert.match(posted[0].text, /connect\.nango\.dev/);
@@ -497,7 +498,7 @@ test('request_connection: falls back to returning the link in-result when no thr
     { nangoSecretKey: 'nk', projectId: 'C123' },
     { startConnectSession: fakeStart, postConnectionLink: async () => true },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion' });
+  const out = await invokeTool(tool, { provider: 'notion' });
   assert.match(out, /connect\.nango\.dev\/xyz/, 'without a conversationId, the link still reaches the model as before');
 });
 
@@ -507,7 +508,7 @@ test('request_connection: if the direct post fails, the link falls back into the
     { nangoSecretKey: 'nk', projectId: 'C123' },
     { startConnectSession: fakeStart, postConnectionLink: async () => false },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion', conversationId: 'slack:T:C:1.0' });
+  const out = await invokeTool(tool, { provider: 'notion', conversationId: 'slack:T:C:1.0' });
   assert.match(out, /connect\.nango\.dev\/zzz/, 'a failed post must not swallow the link');
 });
 
@@ -531,7 +532,7 @@ test('request_connection: GitHub App mints a github-app-oauth session, needs no 
     return { connectLink: 'https://connect.nango.dev/app', token: 't', expiresAt: 'e' };
   };
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' }, { startConnectSession: fakeStart });
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'app' });
+  const out = await invokeTool(tool, { provider: 'github', authMode: 'app' });
   assert.equal(calls.length, 1, 'app does NOT require a repo (unlike pat)');
   assert.equal(calls[0].integrationId, 'github-app-oauth');
   assert.deepEqual(calls[0].tags, { provider: 'github', auth_mode: 'app' });
@@ -553,7 +554,7 @@ test('request_connection: GitHub OAuth can use an operator-configured Nango inte
     },
     { startConnectSession: fakeStart },
   );
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'oauth' });
+  const out = await invokeTool(tool, { provider: 'github', authMode: 'oauth' });
   assert.match(out, /github/i);
   assert.deepEqual(calls[0], {
     secretKey: 'nk',
@@ -569,7 +570,7 @@ test('request_connection: GitHub OAuth can use an operator-configured Nango inte
 test('request_connection: Linear OAuth returns Slack-ready setup copy', async () => {
   const fakeStart = async () => ({ connectLink: 'https://connect.nango.dev/linear', token: 't', expiresAt: 'e' });
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' }, { startConnectSession: fakeStart });
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'linear' });
+  const out = await invokeTool(tool, { provider: 'linear' });
 
   assert.match(out, /Connect Linear/i);
   assert.match(out, /https:\/\/connect\.nango\.dev\/linear/);
@@ -592,16 +593,16 @@ test('request_connection: GitHub PAT requires a repo and stores the repo as meta
     { startConnectSession: fakeStart },
   );
 
-  const missingRepo = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'pat' });
+  const missingRepo = await invokeTool(tool, { provider: 'github', authMode: 'pat' });
   assert.match(missingRepo, /owner\/name/i);
   assert.match(missingRepo, /acme\/widgets/i);
   assert.equal(calls.length, 0, 'no Nango session starts without a repo-bound PAT');
 
-  const badRepo = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'pat', repo: 'https://github.com/Acme/Repo/pull/1' });
+  const badRepo = await invokeTool(tool, { provider: 'github', authMode: 'pat', repo: 'https://github.com/Acme/Repo/pull/1' });
   assert.match(badRepo, /repo is required|repo must/i);
   assert.equal(calls.length, 0, 'no Nango session starts for a PR URL; route policy needs an exact repo');
 
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github', authMode: 'pat', repo: 'Acme/Repo' });
+  const out = await invokeTool(tool, { provider: 'github', authMode: 'pat', repo: 'Acme/Repo' });
   assert.match(out, /Acme\/Repo/);
   assert.match(out, /Connect GitHub PAT/i);
   assert.doesNotMatch(out, /Share this link with the user/i);
@@ -619,7 +620,7 @@ test('request_connection: refuses a non-catalog provider NOT enabled in Nango (n
   const fakeStart = async () => { started++; return { connectLink: 'x', token: 't', expiresAt: 'e' }; };
   const fakeList = async () => [{ uniqueKey: 'airtable', provider: 'airtable', displayName: 'Airtable' }];
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' }, { startConnectSession: fakeStart, listIntegrations: fakeList });
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'salesforce' });
+  const out = await invokeTool(tool, { provider: 'salesforce' });
   assert.match(out, /not enabled in this workspace/i);
   assert.match(out, /airtable/i, 'tells the agent what IS enabled');
   assert.equal(started, 0, 'no Nango session for a provider Nango does not have');
@@ -633,7 +634,7 @@ test('request_connection: accepts a non-catalog provider that IS enabled in Nang
   };
   const fakeList = async () => [{ uniqueKey: 'airtable', provider: 'airtable', displayName: 'Airtable' }];
   const tool = requestConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123' }, { startConnectSession: fakeStart, listIntegrations: fakeList });
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'Airtable' });
+  const out = await invokeTool(tool, { provider: 'Airtable' });
   assert.match(out, /connect\.nango\.dev\/air/);
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].integrationId, 'airtable', 'session locked to the Nango integration key');
@@ -695,10 +696,10 @@ test('disconnect_connection: schema has provider but NO secret param; deletes at
   const tool = disconnectConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123', db }, { deleteConnection: fakeDelete });
 
   assert.equal(tool.name, 'disconnect_connection');
-  const props = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+  const props = (tool.input as v.ObjectSchema<v.ObjectEntries, undefined>).entries;
   assert.deepEqual(Object.keys(props), ['provider'], 'only a provider param — no secret');
 
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion' });
+  const out = await invokeTool(tool, { provider: 'notion' });
   assert.match(out, /🔌|disconnect/i);
   assert.deepEqual(deleted, [{ secretKey: 'nk', connectionId: 'conn_42', providerConfigKey: 'notion' }], 'revoked at Nango by connection_ref');
   assert.equal(rows[0].status, 'disabled', 'local row disabled → tool disappears next turn');
@@ -717,7 +718,7 @@ test('disconnect_connection: revokes with config.nangoIntegrationKey for GitHub 
   const fakeDelete = async (a: { secretKey: string; connectionId: string; providerConfigKey: string }) => { deleted.push(a); };
   const tool = disconnectConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123', db }, { deleteConnection: fakeDelete });
 
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'github' });
+  const out = await invokeTool(tool, { provider: 'github' });
   assert.match(out, /disconnect/i);
   assert.deepEqual(deleted, [{ secretKey: 'nk', connectionId: 'conn_pat', providerConfigKey: 'github-pat' }]);
 });
@@ -727,7 +728,7 @@ test('disconnect_connection: not-connected provider → friendly message, no Nan
   let deletes = 0;
   const fakeDelete = async () => { deletes++; };
   const tool = disconnectConnectionTool({ nangoSecretKey: 'nk', projectId: 'C123', db }, { deleteConnection: fakeDelete });
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({ provider: 'notion' });
+  const out = await invokeTool(tool, { provider: 'notion' });
   assert.match(out, /not connected|nothing to disconnect/i);
   assert.equal(deletes, 0, 'no Nango call when there is no connection to remove');
 });
@@ -769,7 +770,7 @@ test('get-post policy: POST passes the gate, DELETE/PUT/PATCH are blocked with t
   const tool = genericApiTool(profile, 'nk', {});
   for (const method of ['DELETE', 'PUT', 'PATCH']) {
     await assert.rejects(
-      () => (tool.execute as (a: unknown) => Promise<unknown>)({ method, path: '/v1/things/1' }),
+      () => invokeTool(tool, { method, path: '/v1/things/1' }),
       /blocked .* methodPolicy/i,
       `${method} must be blocked`,
     );
@@ -785,7 +786,7 @@ test('effectiveMethodPolicy: per-connection config override beats the profile de
   // Enforcement follows the override: get-only via config blocks even POST.
   const lockedTool = genericApiTool(profile, 'nk', { methodPolicy: 'get-only' });
   await assert.rejects(
-    () => (lockedTool.execute as (a: unknown) => Promise<unknown>)({ method: 'POST', path: '/v1/q' }),
+    () => invokeTool(lockedTool, { method: 'POST', path: '/v1/q' }),
     /Only GET is allowed/,
   );
 });
@@ -827,7 +828,7 @@ test('tavily: Worker-secret connection exposes the generic search tool, POST all
   assert.match(String(callApi.description), /POST \/search/, 'crib teaches the search body shape');
   // get-post policy: search/extract POSTs pass the gate; mutating verbs are refused outright.
   await assert.rejects(
-    () => (callApi.execute as (a: unknown) => Promise<unknown>)({ method: 'DELETE', path: '/search' }),
+    () => invokeTool(callApi, { method: 'DELETE', path: '/search' }),
     /blocked for tavily/,
   );
   assert.doesNotMatch(JSON.stringify(tools.map((t) => t.description)), /tvly-secret/, 'the key never leaks into tool text');

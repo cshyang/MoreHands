@@ -1,7 +1,7 @@
 // Slack-first setup status invariants — run: npx tsx src/setup/status.test.ts
 
 import assert from 'node:assert/strict';
-import { createTestRunner } from '../shared/test-utils';
+import { createTestRunner, invokeTool } from '../shared/test-utils';
 import type { Binding } from '../project/bindings';
 import type { D1Like } from '../skills/repository';
 import { buildSetupStatus, setupStatusTool } from './status';
@@ -225,7 +225,7 @@ test('setup_status tool returns structured JSON without exposing configured valu
     env: { NANGO_SECRET_KEY: 'secret', TRIGGER_SECRET_KEY: 'trigger_secret', AGENT_RUNNER_TOKEN: 'runner_secret', RUNNER_GITHUB_PAT_TEMP: 'github_secret', MOREHANDS_PUBLIC_URL: 'https://hatchery.example' },
   });
 
-  const out = await (tool.execute as (a: unknown) => Promise<string>)({
+  const out = await invokeTool(tool, {
     targetRepo: 'acme/widgets',
     linearTeamKey: 'EDK',
     intent: 'run_agent',

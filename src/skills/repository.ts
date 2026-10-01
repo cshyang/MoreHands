@@ -15,7 +15,7 @@
 //   loadRunnableSkillBody → status-aware (scheduled fire; lets the caller refuse archived/absent)
 
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 
 // Reserved project holding the shared skill baseline every channel inherits. Double-underscore can't
 // collide with a Slack channel id (e.g. "C0B6VFM…"). Skills here are seeded/operator-written; a
@@ -152,10 +152,10 @@ export function skillTools(db: D1Like, projectId: string): ToolDefinition[] {
       'until you open the skill), then the body. Structure the body Overview → When to use → numbered steps; keep it ' +
       'to roughly a screenful; do not duplicate an existing skill — extend it instead. Reusing a name overwrites it ' +
       '(and reactivates it if it was archived).',
-    parameters: Type.Object({
-      skill_md: Type.String({ description: 'Full SKILL.md: `---` name/description frontmatter `---` then the body.' }),
+    input: v.object({
+      skill_md: v.pipe(v.string(), v.description('Full SKILL.md: `---` name/description frontmatter `---` then the body.')),
     }),
-    async execute({ skill_md }) {
+    async run({ data: { skill_md } }) {
       const md = String(skill_md);
       const { name, description } = parseSkillFrontmatter(md);
       if (!name || !description) throw new Error('skill_md needs frontmatter with both `name` and `description`.');
@@ -195,8 +195,8 @@ export function skillTools(db: D1Like, projectId: string): ToolDefinition[] {
     description:
       'Open the full steps of one of your saved skills by name. Your skill list (names + descriptions) is already ' +
       'in context; call this when you need a specific skill’s detailed body.',
-    parameters: Type.Object({ name: Type.String({ description: 'Skill name from your skill list.' }) }),
-    async execute({ name }) {
+    input: v.object({ name: v.pipe(v.string(), v.description('Skill name from your skill list.')) }),
+    async run({ data: { name } }) {
       const body = await loadActiveSkillBody(db, projectId, String(name));
       return body ?? `No active skill named "${name}".`;
     },
@@ -208,8 +208,8 @@ export function skillTools(db: D1Like, projectId: string): ToolDefinition[] {
       'Retire one of your saved skills by name. It leaves your skill list and stops running (a reminder pointing at ' +
       'it will refuse to fire rather than run stale steps). Reversible with restore_skill. Use this instead of ' +
       'deleting — for a skill that is stale, wrong, or has been folded into a broader one.',
-    parameters: Type.Object({ name: Type.String({ description: 'Skill name to archive.' }) }),
-    async execute({ name }) {
+    input: v.object({ name: v.pipe(v.string(), v.description('Skill name to archive.')) }),
+    async run({ data: { name } }) {
       assertCanMutateSkill(projectId, String(name));
       const now = Date.now();
       const res = (await db
@@ -227,8 +227,8 @@ export function skillTools(db: D1Like, projectId: string): ToolDefinition[] {
   const restoreSkill = defineTool({
     name: 'restore_skill',
     description: 'Bring back a skill you archived, by name — it returns to your skill list and can run again.',
-    parameters: Type.Object({ name: Type.String({ description: 'Archived skill name to restore.' }) }),
-    async execute({ name }) {
+    input: v.object({ name: v.pipe(v.string(), v.description('Archived skill name to restore.')) }),
+    async run({ data: { name } }) {
       assertCanMutateSkill(projectId, String(name));
       const now = Date.now();
       const res = (await db

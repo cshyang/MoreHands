@@ -1,5 +1,5 @@
 import { defineTool, type ToolDefinition } from '@flue/runtime';
-import { Type } from '@earendil-works/pi-ai';
+import * as v from 'valibot';
 import type { D1Like } from '../skills/repository';
 import { byteLength as bytes, redactSecrets, safeJson, truncateToBytes } from '../shared/bounded';
 import { withWallClock } from '../shared/wall-clock';
@@ -315,18 +315,18 @@ export function codeModeTools(args: {
       name: 'execute_code',
       description:
         'Run lightweight JavaScript or Python in a Cloudflare Dynamic Worker for computation, parsing, public web fetches, and repeatable transformations. This is not bash, not a repo workspace, not npm/pip install, and not source-code editing.',
-      parameters: Type.Object({
-        language: Type.Union([Type.Literal('javascript'), Type.Literal('python')], { description: 'javascript or python.' }),
-        code: Type.String({
-          description:
-            'For JavaScript, export default async function main(input) { ... }. For Python, define async def main(input): ...',
-        }),
-        input: Type.Optional(Type.Any({ description: 'Optional JSON input passed to main(input).' })),
-        purpose: Type.String({ description: 'Short reason for audit, e.g. parse API response or calculate totals.' }),
-        conversationId: Type.Optional(Type.String({ description: 'Copy from the current Dispatch Input when available.' })),
-        network: Type.Optional(Type.Union([Type.Literal('open_public'), Type.Literal('off')], { description: 'open_public (default) or off.' })),
+      input: v.object({
+        language: v.pipe(v.union([v.literal('javascript'), v.literal('python')]), v.description('javascript or python.')),
+        code: v.pipe(
+          v.string(),
+          v.description('For JavaScript, export default async function main(input) { ... }. For Python, define async def main(input): ...'),
+        ),
+        input: v.optional(v.pipe(v.any(), v.description('Optional JSON input passed to main(input).'))),
+        purpose: v.pipe(v.string(), v.description('Short reason for audit, e.g. parse API response or calculate totals.')),
+        conversationId: v.optional(v.pipe(v.string(), v.description('Copy from the current Dispatch Input when available.'))),
+        network: v.optional(v.pipe(v.union([v.literal('open_public'), v.literal('off')]), v.description('open_public (default) or off.'))),
       }),
-      async execute(params) {
+      async run({ data: params }) {
         const result = await executeCode({
           db,
           loader,

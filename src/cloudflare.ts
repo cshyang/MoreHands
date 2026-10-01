@@ -1,19 +1,22 @@
-// Worker-level Cloudflare exports, separate from agent modules. Named exports become
-// top-level Worker exports — this is how the Sandbox DO class reaches the Worker on
-// Flue 0.11+ (replaces the ≤0.9.1 "class_name ends with Sandbox" auto-wiring).
-//
-// The default export hosts the cron clock the external ticker worker used to provide
-// (0.9.1's generated entry dropped `scheduled`; 0.11 forwards it). Each cron calls the
-// existing token-guarded internal routes IN-PROCESS via app.fetch — same routes, same
-// guards, same KV dedupe, minus the second worker and the HTTP hop.
+// Worker-level exports and product-task cron clock. Flue composes these non-HTTP
+// handlers with app.ts; agent liveness is owned by the runtime's Durable Object alarms.
+// Each task calls the existing token-guarded internal routes in-process via app.fetch.
 
-import type { D1Like } from '../src/skills/repository';
-import { takeDueReminders } from '../src/gateway/reminders-store';
+import { DurableObject } from 'cloudflare:workers';
+import type { D1Like } from './skills/repository';
+import { takeDueReminders } from './gateway/reminders-store';
 import app from './app';
 
 export { Sandbox } from '@cloudflare/sandbox';
 
-export const HEARTBEAT_CRON = '0 */6 * * *'; // liveness backstop, fans out to active projects
+// Keep the retired registry namespace exported so its existing SQLite data survives
+// the cutover. No binding or new traffic uses it; deleting its class destroys storage.
+export class FlueRegistry extends DurableObject {
+  async fetch(): Promise<Response> {
+    return new Response('Registry retired', { status: 404 });
+  }
+}
+
 export const REFLECT_CRON = '0 19 * * *'; // nightly REM at 03:00 KL (UTC+8, crons are UTC)
 export const RECONCILE_CRON = '*/2 * * * *'; // agent-run outbox backstop
 export const REMINDERS_CRON = '* * * * *'; // due-scan for agent-set reminders (minute precision)
@@ -56,19 +59,26 @@ async function scanReminders(env: ScheduledEnv, ctx: ExecutionCtx): Promise<void
 
 export default {
   async scheduled(controller: { cron?: string }, env: ScheduledEnv, ctx: ExecutionCtx): Promise<void> {
-    const job =
-      controller.cron === REMINDERS_CRON
-        ? scanReminders(env, ctx)
-        : controller.cron === RECONCILE_CRON
-          ? Promise.all([
-              callInternal(env, ctx, '/__internal/agent-runs/reconcile', {}),
-              // Layer 4 rides the same 2-min tick: the review-sweep gate is one cheap SQL query,
-              // so sharing the reconcile cadence costs nothing on quiet channels.
-              callInternal(env, ctx, '/__internal/review-sweep', {}),
-            ]).then(() => undefined)
-          : controller.cron === REFLECT_CRON
-            ? callInternal(env, ctx, '/__internal/reflect-sweep', {})
-            : callInternal(env, ctx, '/__heartbeat', {});
+    if (!env.HEARTBEAT_TOKEN) return;
+    let job: Promise<void>;
+    switch (controller.cron) {
+      case REMINDERS_CRON:
+        job = scanReminders(env, ctx);
+        break;
+      case RECONCILE_CRON:
+        job = Promise.all([
+          callInternal(env, ctx, '/__internal/agent-runs/reconcile', {}),
+          callInternal(env, ctx, '/__internal/replies/reconcile', {}),
+          // Layer 4 shares the 2-min tick; the review-sweep gate is one cheap SQL query.
+          callInternal(env, ctx, '/__internal/review-sweep', {}),
+        ]).then(() => undefined);
+        break;
+      case REFLECT_CRON:
+        job = callInternal(env, ctx, '/__internal/reflect-sweep', {});
+        break;
+      default:
+        return;
+    }
     ctx.waitUntil(job.catch((e) => console.log(`[cron] ${controller.cron} failed: ${e instanceof Error ? e.message : String(e)}`)));
   },
 };
