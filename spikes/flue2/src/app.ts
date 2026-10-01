@@ -4,6 +4,7 @@ import { createAgentRouter } from '@flue/runtime/routing';
 import { Project } from './agents/project';
 import { Retry, RetryOnce } from './agents/retry';
 import { Gw } from './agents/gw';
+import { Gb, Gj, Gf } from './agents/gw2';
 import { Pa, Pf, Pg, Pr, Pq, Ph, Hng, Stall, Sbx, SbxC } from './agents/probe';
 import { createProvider } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
@@ -263,14 +264,129 @@ app.get('/gw-fail', async (c) => {
   return c.json(r.map((x) => JSON.parse(x.body)));
 });
 app.get('/gw-dump', async (c) => {
-  await gwSchema(c.env.DB);
+  await gw2Schema(c.env.DB);
   const q = async (sql: string) => (await c.env.DB.prepare(sql).all()).results;
   return c.json({
     msgs: await q('SELECT * FROM gwmsgs ORDER BY ts'),
     rows: await q('SELECT * FROM gwrows ORDER BY seq'),
     events: await q("SELECT ts, type, instance_id, submission_id, body FROM events WHERE type IN ('submission_queued','submission_running','submission_settled','tool_start','turn_request') ORDER BY seq"),
+    pending: await q('SELECT * FROM pending ORDER BY id'),
   });
 });
+
+// ---- final-text-as-reply comparison (gw2): arms base | j | f ---------------------------------------
+async function gw2Schema(db: D1Database) {
+  await gwSchema(db);
+  await db.prepare('CREATE TABLE IF NOT EXISTS pending(id INTEGER PRIMARY KEY AUTOINCREMENT, conv TEXT, sender TEXT, text TEXT, event_id TEXT, status TEXT, created_at INTEGER)').run();
+  await db.prepare('CREATE TABLE IF NOT EXISTS lasttext(conv TEXT PRIMARY KEY, text TEXT, posted INTEGER, ts INTEGER)').run();
+}
+let gw2Arm: 'base' | 'j' | 'f' = 'j';
+const GW2_AGENTS: Record<string, any> = { base: Gb, j: Gj, f: Gf };
+app.post('/gw2-config', async (c) => {
+  gw2Arm = (await c.req.json<{ arm: 'base' | 'j' | 'f' }>()).arm;
+  return c.json({ arm: gw2Arm });
+});
+app.post('/gw2-reset', async (c) => {
+  await gw2Schema(c.env.DB);
+  for (const t of ['claims', 'inflight', 'settled', 'gwrows', 'gwmsgs', 'gwcap', 'lastsettle', 'pending', 'lasttext', 'events']) await c.env.DB.prepare(`DELETE FROM ${t}`).run();
+  return c.json({ ok: true });
+});
+async function gw2Dispatch(db: D1Database, conv: string, attrs: Record<string, string>, body: string, key: string) {
+  const receipt = await dispatch(GW2_AGENTS[gw2Arm], { id: conv, idempotencyKey: key, message: { kind: 'signal', type: 'slack.message', body, attributes: attrs } });
+  if (!receipt.deduplicated) await db.prepare('INSERT INTO inflight(conv, submission_id) VALUES (?,?)').bind(conv, receipt.submissionId).run();
+  return receipt;
+}
+const gw2Row = (db: D1Database, conv: string, kind: string, key: string, text: string) =>
+  db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(conv, kind, key, text, '', Date.now()).run();
+app.post('/gw2', async (c) => {
+  const db = c.env.DB;
+  const b = await c.req.json<{ event_id: string; conv: string; sender: string; text: string; token: string; burst: string }>();
+  await gw2Schema(db);
+  const claim = (await db.prepare('INSERT OR IGNORE INTO claims(event_id) VALUES (?)').bind(b.event_id).run()) as any;
+  if (!(claim?.meta?.changes ?? 0)) return c.json({ dup: true });
+  const n = await db.prepare('SELECT COUNT(*) AS n FROM inflight WHERE conv=? AND submission_id NOT IN (SELECT submission_id FROM settled)').bind(b.conv).first<{ n: number }>();
+  const busy = (n?.n ?? 0) > 0;
+  const attrs: Record<string, string> = { sender: b.sender, eventId: b.event_id };
+  let path: string;
+  let submissionId = '';
+  if (busy && gw2Arm === 'base') {
+    // ARM:BASE:start (gate: park instead of dispatch)
+    path = 'parked';
+    await db.prepare("INSERT INTO pending(conv, sender, text, event_id, status, created_at) VALUES (?,?,?,?, 'pending', ?)").bind(b.conv, b.sender, b.text, b.event_id, Date.now()).run();
+    await gw2Row(db, b.conv, 'eyes', b.event_id, '');
+    // ARM:BASE:end
+  } else if (busy) {
+    path = 'eyes';
+    await gw2Row(db, b.conv, 'eyes', b.event_id, '');
+    submissionId = (await gw2Dispatch(db, b.conv, attrs, b.text, b.event_id)).submissionId;
+  } else {
+    path = 'ack';
+    attrs.ackTs = `ack-${crypto.randomUUID().slice(0, 6)}`;
+    await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(b.conv, 'ack', attrs.ackTs, 'Working...', '', Date.now()).run();
+    submissionId = (await gw2Dispatch(db, b.conv, attrs, b.text, b.event_id)).submissionId;
+  }
+  await db.prepare('INSERT INTO gwmsgs(event_id, burst, conv, sender, token, text, path, submission_id, ts) VALUES (?,?,?,?,?,?,?,?,?)').bind(b.event_id, b.burst, b.conv, b.sender, b.token, b.text, path, submissionId, Date.now()).run();
+  return c.json({ path });
+});
+// ARM:BASE:start (sweep: combined turn for parked rows older than the grace window with no turn in flight)
+app.post('/gw2-sweep', async (c) => {
+  const db = c.env.DB;
+  await gw2Schema(db);
+  const GRACE_MS = 20_000; // sim value; production SWEEP_GRACE_MS is 30 s and the cron tick is 2 min
+  const convs = (await db.prepare("SELECT DISTINCT conv FROM pending WHERE status='pending' AND created_at < ?").bind(Date.now() - GRACE_MS).all<{ conv: string }>()).results ?? [];
+  let swept = 0;
+  for (const { conv } of convs) {
+    const n = await db.prepare('SELECT COUNT(*) AS n FROM inflight WHERE conv=? AND submission_id NOT IN (SELECT submission_id FROM settled)').bind(conv).first<{ n: number }>();
+    if ((n?.n ?? 0) > 0) continue;
+    const rows = (await db.prepare("SELECT id, sender, text, event_id FROM pending WHERE conv=? AND status='pending' ORDER BY id").bind(conv).all<{ id: number; sender: string; text: string; event_id: string }>()).results ?? [];
+    if (!rows.length) continue;
+    for (const r of rows) await db.prepare("UPDATE pending SET status='dispatched' WHERE id=? AND status='pending'").bind(r.id).run();
+    const ackTs = `ack-${crypto.randomUUID().slice(0, 6)}`;
+    await db.prepare('INSERT INTO gwrows(conv, kind, key, text, extra, ts) VALUES (?,?,?,?,?,?)').bind(conv, 'ack', ackTs, 'Working...', '', Date.now()).run();
+    await gw2Row(db, conv, 'sweep', String(rows.length), '');
+    const body = rows.length === 1 ? rows[0].text : rows.map((r) => `[${r.sender}]: ${r.text}`).join('\n');
+    await gw2Dispatch(db, conv, { sender: rows[rows.length - 1].sender, ackTs }, body, `sweep:${rows.map((r) => r.event_id).join('+')}`.slice(0, 256));
+    swept++;
+  }
+  return c.json({ swept });
+});
+// ARM:BASE:end
+app.get('/gw2-state', async (c) => {
+  await gw2Schema(c.env.DB);
+  const a = await c.env.DB.prepare('SELECT COUNT(*) AS n FROM inflight WHERE submission_id NOT IN (SELECT submission_id FROM settled)').first<{ n: number }>();
+  const p = await c.env.DB.prepare("SELECT COUNT(*) AS n FROM pending WHERE status='pending'").first<{ n: number }>();
+  return c.json({ inflight: a?.n ?? 0, pending: p?.n ?? 0 });
+});
+// ARM:F:start (final-text capture and post, observer side; one chain per isolate keeps D1 writes in event order)
+let fChain: Promise<void> = Promise.resolve();
+observe((event, ctx) => {
+  const e = event as any;
+  const conv = e.instanceId as string | undefined;
+  if (!conv || !conv.includes('/conv:F-') || (e.type !== 'message_end' && e.type !== 'submission_settled')) return;
+  fChain = fChain.then(async () => {
+    try {
+      const db = (ctx.env as any).DB as D1Database;
+      if (e.type === 'message_end') {
+        const blocks: any[] = Array.isArray(e.message?.content) ? e.message.content : [];
+        if (e.message?.role !== 'assistant' || blocks.some((b) => b.type === 'toolCall')) return; // intermediate (tool-call) messages are never captured
+        const text = blocks.filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+        await db.prepare('INSERT OR REPLACE INTO lasttext(conv, text, posted, ts) VALUES (?,?,0,?)').bind(conv, text, Date.now()).run();
+        return;
+      }
+      if (e.outcome !== 'completed') return;
+      const last = await db.prepare('SELECT text FROM lasttext WHERE conv=? AND posted=0').bind(conv).first<{ text: string }>();
+      if (!last) return;
+      await db.prepare('UPDATE lasttext SET posted=1 WHERE conv=?').bind(conv).run();
+      if (!last.text) { await gw2Row(db, conv, 'empty_final', '', ''); return; }
+      const ack = await db.prepare("SELECT key FROM gwrows WHERE conv=? AND kind='ack' AND extra!='edited' ORDER BY seq LIMIT 1").bind(conv).first<{ key: string }>();
+      if (ack) await db.prepare("UPDATE gwrows SET text=?, extra='edited' WHERE conv=? AND kind='ack' AND key=?").bind(last.text, conv, ack.key).run();
+      await gw2Row(db, conv, 'post', '', last.text);
+    } catch (err) {
+      console.log('[gw2 observer]', err instanceof Error ? err.message : String(err));
+    }
+  });
+});
+// ARM:F:end
 
 app.route('/agents/pa', createAgentRouter(Pa));
 app.route('/agents/pq', createAgentRouter(Pq));
