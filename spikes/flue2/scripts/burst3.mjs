@@ -1,7 +1,11 @@
 // Final-text-as-reply comparison. node scripts/burst3.mjs <base|j|f> [seed] > out.json
 // 26 bursts as in burst2 (same seed, same messages and gaps) + 6 tool-call bursts. Sequential, pause between bursts,
 // provider-429 bursts re-run (max 2). Base arm also ticks the sweep every 10 s (20 s grace).
+import fs from 'node:fs';
 const BASE = 'http://localhost:5199';
+// Optional checkpoint file survives an interrupted harness; resume never clears local D1.
+const checkpoint = process.argv[4];
+const resume = checkpoint && fs.existsSync(checkpoint) ? JSON.parse(fs.readFileSync(checkpoint, 'utf8')) : null;
 const arm = process.argv[2] ?? 'j';
 const ARM = arm.toUpperCase();
 let seed = Number(process.argv[3] ?? 42);
@@ -19,7 +23,8 @@ const T = Date.now();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const j = async (path, init) => (await fetch(`${BASE}${path}`, init)).json();
 const post = (b) => j('/gw2', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(b) });
-await fetch(`${BASE}/events`); await fetch(`${BASE}/gw2-reset`, { method: 'POST' });
+await fetch(`${BASE}/events`);
+if (!resume) await fetch(`${BASE}/gw2-reset`, { method: 'POST' });
 await j('/gw2-config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ arm }) });
 
 const plans = [];
@@ -54,8 +59,9 @@ async function runOnce(p, attempt) {
 }
 let sweeping = true;
 if (arm === 'base') (async () => { while (sweeping) { await sleep(10000); try { await j('/gw2-sweep', { method: 'POST' }); } catch {} } })();
-const runs = [];
+const runs = resume?.runs ?? [];
 for (const p of plans) {
+  if (runs.some((r) => r.plan.burst === p.burst)) continue;
   const attempts = [];
   for (let a = 0; a < 3; a++) {
     const r = await runOnce(p, a);
@@ -64,6 +70,8 @@ for (const p of plans) {
     await sleep(30000);
   }
   runs.push({ plan: p, attempts });
+  if (checkpoint) fs.writeFileSync(checkpoint, JSON.stringify({ arm, runs, dump: await j('/gw-dump') }));
+  console.error(`${ARM} ${p.burst} complete (${attempts.length} attempt(s))`);
   await sleep(8000);
 }
 sweeping = false;
