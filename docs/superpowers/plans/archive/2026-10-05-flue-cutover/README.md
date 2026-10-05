@@ -13,7 +13,7 @@ The six documents below are exact historical originals. Their earlier draft/acti
 - [2026-10-04-reconciliation-budget-adjustment.md](2026-10-04-reconciliation-budget-adjustment.md)
 - [2026-10-05-native-submission-inspection.md](2026-10-05-native-submission-inspection.md)
 
-Private evidence is retained locally in `.superpowers/sdd/2026-10-01-flue-cutover-safety/`, with chronological approvals, failures, corrections and completion appended to its `progress.md`. These ignored files are not published with the repository.
+Private evidence is retained locally in `.superpowers/archive/2026-10-05-flue-cutover/private-evidence.tar.gz`, with its manifest verifying every preserved file, including the chronological `progress.md` approval ledger. The database backup and active admin credential also have owner-only copies in `.superpowers/private/`. These ignored files are not published with the repository.
 
 The final namespace has 29 stored objects: all 17 matching native objects are idle with physical alarms null; 12 legacy objects remain preserved under prior reviewed retirement rulings. All 20 stored Slack deliveries have fresh positive trusted-bot and exact delivery metadata matches. Eight genuine Slack events are durably accepted, including one quiet event whose extra event content is tombstoned. All seven retained native request payloads pass whole/chunk digest and route/key checks. Repeated ingress/reply recovery changes no receipts, transcript records, outbox posts or file-grant count.
 

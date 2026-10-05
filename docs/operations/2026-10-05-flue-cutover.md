@@ -71,5 +71,5 @@ are historical checkpoints superseded by later explicit human approvals. The hum
 requested publication after merging the migration branch.
 
 Detailed approvals, failures, corrections, hashes, observations and the D1 backup remain in the
-local ignored `.superpowers/sdd/2026-10-01-flue-cutover-safety/` evidence directory.
+local ignored `.superpowers/archive/2026-10-05-flue-cutover/private-evidence.tar.gz` archive. Its manifest verifies each preserved record. Owner-only backup and admin credential copies remain in `.superpowers/private/`.
 That private material is intentionally outside Git. This sanitized record is the public summary.

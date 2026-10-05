@@ -17,3 +17,12 @@ dist/
 
 # scratch clones for exploring other repos
 /tmp/
+
+# git worktrees created by the harness
+.claude/worktrees/
+
+# Private verification archives and operational credentials
+.superpowers/
+
+# macOS folder metadata
+.DS_Store
