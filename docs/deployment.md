@@ -249,8 +249,10 @@ The Trigger runner is configured by [trigger.config.ts](../trigger.config.ts). I
 - `agent-kits/coding-default`
 
 Deploys happen automatically: a push to `main` touching `trigger/**`, `trigger.config.ts`,
-`agent-kits/**`, or `package-lock.json` runs [.github/workflows/deploy-runner.yml](../.github/workflows/deploy-runner.yml)
-(gate: typecheck + tests, then `trigger deploy`). Manual fallback: `npm run trigger:deploy`.
+`agent-kits/**`, `package-lock.json`, or the runner workflow itself runs
+[.github/workflows/deploy-runner.yml](../.github/workflows/deploy-runner.yml)
+(gate: typecheck + tests, then the project's locked `trigger deploy` CLI).
+Manual fallback: `npm run trigger:deploy`.
 
 Set Trigger.dev environment variables for the task (dashboard → Environment Variables):
 

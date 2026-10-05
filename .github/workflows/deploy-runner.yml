@@ -20,6 +20,7 @@ on:
   push:
     branches: [main]
     paths:
+      - '.github/workflows/deploy-runner.yml'
       - 'trigger/**'
       - 'trigger.config.ts'
       - 'agent-kits/**'
@@ -56,4 +57,4 @@ jobs:
       # `trigger deploy` builds the bundle (incl. additionalPackages: pi + the capability extensions)
       # and registers run-coding-task. Defaults to the prod environment, matching the manual deploy.
       - name: Deploy runner (trigger.dev)
-        run: npx trigger.dev@latest deploy
+        run: npm run trigger:deploy

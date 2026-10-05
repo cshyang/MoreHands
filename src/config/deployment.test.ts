@@ -126,6 +126,19 @@ test('CI migration guard stops on pending migrations and failed remote observati
   }
 });
 
+test('runner CI deploys with the SDK-compatible locked CLI', async () => {
+  const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+  const pkg = JSON.parse(read('package.json'));
+  const lock = JSON.parse(read('package-lock.json')).packages;
+  const version = lock['node_modules/@trigger.dev/sdk'].version;
+  assert.equal(lock['node_modules/trigger.dev'].version, version);
+  assert.equal(lock['node_modules/@trigger.dev/build'].version, version);
+  assert.equal(pkg.scripts['trigger:deploy'], 'trigger deploy');
+  const workflow = read('.github/workflows/deploy-runner.yml');
+  assert.match(workflow, /run: npm run trigger:deploy/);
+  assert.doesNotMatch(workflow, /trigger\.dev@latest/);
+});
+
 test('Flue cutover preserves Durable Object history without a delete/recreate migration', async () => {
   const source = readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8');
   for (const migration of [
