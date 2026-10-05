@@ -5,11 +5,41 @@
 // (`.some(m => m.user === botUserId)`) and the backscroll it hands the agent so a threaded turn
 // isn't context-blind. `renderThreadBackscroll` formats those messages for the prompt.
 
+import { slackFileMetadata, type SlackFileMeta } from './events';
+
 export interface ThreadMessage {
   user?: string;
   bot_id?: string;
   text: string;
   ts: string;
+  files?: SlackFileMeta[];
+}
+
+export interface SlackMediaContext {
+  currentFiles: SlackFileMeta[];
+  historyFiles: SlackFileMeta[];
+  imageCandidates: SlackFileMeta[];
+}
+export function slackMediaContext(currentFiles: SlackFileMeta[], history: ThreadMessage[], excludeTs: string): SlackMediaContext {
+  const prior = boundedHistory(history, excludeTs);
+  const historyFiles = prior.flatMap(message => message.files ?? []);
+  const candidates = [...currentFiles, ...historyFiles.slice().reverse()];
+  const seen = new Set<string>();
+  const imageCandidates = candidates.filter(file => {
+    if (seen.has(file.id)) return false;
+    seen.add(file.id);
+    return !file.mimetype || file.mimetype.startsWith('image/');
+  });
+  return { currentFiles, historyFiles, imageCandidates };
+}
+
+function boundedHistory(history: ThreadMessage[], excludeTs?: string): ThreadMessage[] {
+  let remaining = 20;
+  return history.filter(message => message.ts !== excludeTs).slice(-20).reverse().map(message => {
+    const files = remaining ? (message.files ?? []).slice(-remaining) : [];
+    remaining -= files.length;
+    return { ...message, files };
+  }).reverse();
 }
 
 const BACKSCROLL_MAX_CHARS = 6000;
@@ -24,11 +54,12 @@ export function renderThreadBackscroll(
   opts: { excludeTs?: string; maxChars?: number } = {},
 ): string {
   const max = opts.maxChars ?? BACKSCROLL_MAX_CHARS;
-  const lines = messages
-    .filter((m) => m.ts !== opts.excludeTs && m.text.trim().length > 0)
+  const lines = boundedHistory(messages, opts.excludeTs)
+    .filter((m) => m.text.trim().length > 0 || m.files?.length)
     .map((m) => {
       const who = m.bot_id || m.user === botUserId ? 'you (earlier)' : m.user ?? 'someone';
-      return `${who}: ${m.text.trim()}`;
+      const files = (m.files ?? []).slice(0, 20).map(file => `[file ${file.id}: ${file.name ?? 'unnamed'} (${file.mimetype ?? 'unknown type'})]`).join(' ');
+      return files ? `${who} (${m.ts}): ${m.text.trim()} ${files}`.trim() : `${who}: ${m.text.trim()}`;
     });
   if (!lines.length) return '';
   const kept: string[] = [];
@@ -44,7 +75,7 @@ export function renderThreadBackscroll(
 interface RepliesApiResponse {
   ok: boolean;
   error?: string;
-  messages?: Array<{ user?: string; bot_id?: string; text?: string; ts?: string }>;
+  messages?: Array<{ user?: string; bot_id?: string; text?: string; ts?: string; files?: unknown }>;
 }
 
 /** Fetch a thread's messages (one conversations.replies call; needs `channels:history`).
@@ -63,7 +94,7 @@ export async function fetchThreadReplies(
   const res = await f(url, { headers: { authorization: `Bearer ${token}` } });
   const data = (await res.json()) as RepliesApiResponse;
   if (!data.ok || !data.messages) return [];
-  return data.messages.map((m) => ({ user: m.user, bot_id: m.bot_id, text: m.text ?? '', ts: m.ts ?? '' }));
+  return data.messages.map((m) => ({ user: m.user, bot_id: m.bot_id, text: m.text ?? '', ts: m.ts ?? '', ...(slackFileMetadata(m.files).length ? { files: slackFileMetadata(m.files) } : {}) }));
 }
 
 /** Fetch a channel's recent top-level history (one conversations.history call; same
@@ -85,6 +116,6 @@ export async function fetchChannelHistory(
   const data = (await res.json()) as RepliesApiResponse;
   if (!data.ok || !data.messages) return [];
   return data.messages
-    .map((m) => ({ user: m.user, bot_id: m.bot_id, text: m.text ?? '', ts: m.ts ?? '' }))
+    .map((m) => ({ user: m.user, bot_id: m.bot_id, text: m.text ?? '', ts: m.ts ?? '', ...(slackFileMetadata(m.files).length ? { files: slackFileMetadata(m.files) } : {}) }))
     .reverse();
 }

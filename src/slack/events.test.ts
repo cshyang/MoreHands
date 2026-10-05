@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createTestRunner } from '../shared/test-utils';
 import {
   parseSlackEventEnvelope,
+  verifiedIngressEvent,
   slackEventId,
   slackUrlVerification,
   slackUserMessageEvent,
@@ -132,4 +133,23 @@ test('slackEventId: uses Slack event_id and falls back to channel timestamp', as
   assert.equal(slackEventId({}, event), 'C1:111.222');
 });
 
+test('durable event digest covers original UTF-8 bytes while private fields are excluded', async () => {
+  const body = { type: 'event_callback',team_id:'T',event_id:'E',api_app_id:'A',token:'private-value',
+    event:{type:'message',channel:'C',ts:'1.0',user:'U',text:'世界🙂',files:[{id:'F',url_private:'https://private.invalid'}]}};
+  const raw = JSON.stringify(body), event = slackUserMessageEvent(body)!;
+  const selected = await verifiedIngressEvent(raw, body, event);
+  const expected = Buffer.from(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))).toString('hex');
+  assert.equal(selected.digest, expected); assert.equal(selected.key,'T:E');
+  assert.ok(!selected.eventJson.includes('private-value')); assert.ok(!selected.eventJson.includes('private.invalid'));
+  assert.equal(JSON.parse(selected.eventJson).event.text,'世界🙂');
+  assert.notEqual((await verifiedIngressEvent(raw+' ',body,event)).digest, selected.digest);
+});
+test('durable acceptance rejects ambiguous identity, invalid timestamps and oversized native keys', async () => {
+  const body = { type:'event_callback',team_id:'T',event_id:'E',event:{type:'message',channel:'C',ts:'1.0',user:'U',text:'hello'}};
+  for (const bad of [{...body,event_id:''},{...body,team_id:' T'},{...body,event_id:'x'.repeat(300)},
+    {...body,event:{...body.event,ts:'1'}},{...body,event:{...body.event,text:{} as never}},
+    {...body,event:{...body.event,thread_ts:'bad'}}]) {
+    await assert.rejects(verifiedIngressEvent(JSON.stringify(bad),bad,slackUserMessageEvent(bad)!));
+  }
+});
 await run();

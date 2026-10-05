@@ -3,6 +3,8 @@
 // re-processing, no loss), and the nightly gate only surfaces projects with something new.
 
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { createTestRunner } from '../shared/test-utils';
 import { agentPostedInConversation, logMessage, projectsWithUnreflected, projectsWithUnreflectedRuns, takeUnreflectedBatch, takeUnreflectedRuns, buildReflectInstructions } from './reflection';
 import type { D1Like } from '../skills/repository';
@@ -43,7 +45,7 @@ class FakeD1 implements D1Like {
       const [pid, conv] = v as [string, string];
       return this.msgs.some((m) => m.project_id === pid && m.conversation_id === conv && m.role === 'agent') ? [{ x: 1 }] : [];
     }
-    if (q.includes('FROM agent_runs_m1 r')) {
+    if (q.includes('FROM agent_runs r')) {
       // projectsWithUnreflectedRuns: terminal runs past max(run watermark, lookback cutoff).
       const [cutoff] = v as [number];
       const seen = new Set<string>();
@@ -61,7 +63,7 @@ class FakeD1 implements D1Like {
       const [pid] = v as [string];
       return this.runState.has(pid) ? [{ last_run_completed_at: this.runState.get(pid) }] : [];
     }
-    if (q.includes('FROM agent_runs_m1') && q.includes('WHERE project_id=?')) {
+    if (q.includes('FROM agent_runs') && q.includes('WHERE project_id=?')) {
       const [pid, since] = v as [string, number];
       const limit = Number((q.match(/LIMIT (\d+)/) ?? [])[1] ?? 1e9);
       return this.runs
@@ -115,6 +117,20 @@ class FakeD1 implements D1Like {
 
 const log = (db: FakeD1, project: string, text: string, sender = 'slack:T:U1') =>
   logMessage(db, { projectId: project, conversationId: 'c1', senderId: sender, role: 'user', text });
+
+function sqliteFixture() {
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(readFileSync(new URL('../../migrations/0002_messages.sql', import.meta.url), 'utf8'));
+  sql.exec(readFileSync(new URL('../../migrations/0009_messages_ambient.sql', import.meta.url), 'utf8'));
+  sql.exec(readFileSync(new URL('../../migrations/0024_review_state.sql', import.meta.url), 'utf8'));
+  sql.exec(readFileSync(new URL('../../migrations/0031_messages_delivery_id.sql', import.meta.url), 'utf8'));
+  const db: D1Like = { prepare: (query) => ({ bind: (...values) => ({
+    run: async () => ({ meta: { changes: Number(sql.prepare(query).run(...values as never[]).changes) } }),
+    first: async <T>() => (sql.prepare(query).get(...values as never[]) ?? null) as T | null,
+    all: async <T>() => ({ results: sql.prepare(query).all(...values as never[]) as T[] }),
+  }) }) };
+  return { sql, db };
+}
 
 const { test, run } = createTestRunner();
 
@@ -244,6 +260,86 @@ test('agentPostedInConversation: true only for conversations with an agent reply
   await logMessage(db, { projectId: 'P', conversationId: 'c1', senderId: 'agent', role: 'agent', text: 'hello' });
   assert.equal(await agentPostedInConversation(db, 'P', 'c1'), true);
   assert.equal(await agentPostedInConversation(db, 'P', 'c2'), false);
+});
+
+test('a durable transcript retry inserts once and preserves the first created_at', async () => {
+  const { sql, db } = sqliteFixture();
+  const input = {
+    projectId: 'P', conversationId: 'C', senderId: 'agent', role: 'agent' as const,
+    text: '  answer  ', ambient: true, deliveryId: 'ingress-transcript:1', now: 100,
+  };
+  await logMessage(db, input);
+  await logMessage(db, { ...input, text: 'answer', now: 200, reviewCandidate: true });
+
+  const rows = sql.prepare('SELECT project_id, conversation_id, sender_id, role, text, ambient, created_at, delivery_id FROM messages').all();
+  assert.equal(rows.length, 1);
+  assert.deepEqual({ ...rows[0] }, {
+    project_id: 'P', conversation_id: 'C', sender_id: 'agent', role: 'agent',
+    text: 'answer', ambient: 1, created_at: 100, delivery_id: 'ingress-transcript:1',
+  });
+});
+
+for (const field of ['projectId', 'conversationId', 'senderId', 'role', 'text', 'ambient'] as const) {
+  test('a conflicting durable transcript delivery ID is refused: ' + field, async () => {
+    const { sql, db } = sqliteFixture();
+    const first = {
+      projectId: 'P', conversationId: 'C', senderId: 'agent', role: 'agent' as const,
+      text: 'answer', ambient: false, deliveryId: 'same', now: 100,
+    };
+    await logMessage(db, first);
+    const second = { ...first, now: 200, [field]: field === 'role' ? 'user' : field === 'text' ? 'different' : 'wrong-' + field };
+    if (field === 'ambient') second.ambient = true;
+    await assert.rejects(logMessage(db, second), /transcript delivery ID conflict/);
+
+    const row = sql.prepare('SELECT text, created_at FROM messages').get();
+    assert.deepEqual({ ...(row as Record<string, unknown>) }, { text: 'answer', created_at: 100 });
+  });
+}
+
+function productionSchemaFixture() {
+  const actual = new DatabaseSync(':memory:');
+  const migrations = new URL('../../migrations/', import.meta.url);
+  for (const name of readdirSync(migrations).filter(name => name.endsWith('.sql')).sort()) {
+    actual.exec(readFileSync(new URL(name, migrations), 'utf8'));
+  }
+  const binding: D1Like = { prepare: query => ({ bind: (...values) => ({
+    run: async () => ({ meta: { changes: Number(actual.prepare(query).run(...values as never[]).changes) } }),
+    first: async <T>() => (actual.prepare(query).get(...values as never[]) ?? null) as T | null,
+    all: async <T>() => ({ results: actual.prepare(query).all(...values as never[]) as T[] }),
+  }) }) };
+  return { sql: actual, db: binding };
+}
+
+test('reflection reads the migrated agent_runs table and keeps the message watermark independent', async () => {
+  const { sql, db } = productionSchemaFixture();
+  try {
+    assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name='agent_runs_m1'").get()!.n, 0);
+    sql.prepare('INSERT INTO reflection_state(project_id,last_message_id,last_run_completed_at,last_reflected_at) VALUES(?,?,?,?)')
+      .run('P', 42, 0, 0);
+    const insert = sql.prepare('INSERT INTO agent_runs(id,project_id,source_type,idempotency_key,target_repo,status,summary,created_at,updated_at,completed_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
+    insert.run('finished', 'P', 'manual', 'finished', 'owner/repo', 'completed', 'done', NOW - 2000, NOW - 1000, NOW - 1000);
+    insert.run('running', 'Q', 'manual', 'running', 'owner/repo', 'running', null, NOW - 2000, NOW, null);
+    insert.run('old', 'OLD', 'manual', 'old', 'owner/repo', 'completed', 'stale', NOW - 10 * 86400000, NOW - 9 * 86400000, NOW - 9 * 86400000);
+    assert.deepEqual(await projectsWithUnreflectedRuns(db, NOW), ['P']);
+    assert.match((await takeUnreflectedRuns(db, 'P', NOW))!, /\[completed\] manual.*done/);
+    assert.deepEqual({ ...sql.prepare('SELECT last_message_id,last_run_completed_at FROM reflection_state WHERE project_id=?').get('P') },
+      { last_message_id: 42, last_run_completed_at: NOW - 1000 });
+    assert.equal(await takeUnreflectedRuns(db, 'P', NOW), null);
+    assert.deepEqual(await projectsWithUnreflectedRuns(db, NOW), []);
+  } finally { sql.close(); }
+});
+
+test('an unavailable run query leaves the reflection watermark untouched', async () => {
+  const { sql, db } = productionSchemaFixture();
+  try {
+    sql.prepare('INSERT INTO reflection_state(project_id,last_message_id,last_run_completed_at,last_reflected_at) VALUES(?,?,?,?)')
+      .run('P', 42, 123, 456);
+    sql.exec('DROP TABLE agent_runs');
+    await assert.rejects(projectsWithUnreflectedRuns(db, NOW), /no such table/);
+    await assert.rejects(takeUnreflectedRuns(db, 'P', NOW), /no such table/);
+    assert.deepEqual({ ...sql.prepare('SELECT last_message_id,last_run_completed_at,last_reflected_at FROM reflection_state WHERE project_id=?').get('P') },
+      { last_message_id: 42, last_run_completed_at: 123, last_reflected_at: 456 });
+  } finally { sql.close(); }
 });
 
 await run();

@@ -1,5 +1,7 @@
 # Flue Native Migration
 
+**Current status (2026-10-05):** Implemented, reviewed and verified in the completed [production cutover](../../operations/2026-10-05-flue-cutover.md). The matching execution plan is [archived](../plans/archive/2026-10-05-flue-cutover/README.md). Authorization statements and findings below describe the original design checkpoint; subsequent human approvals and completion supersede those statuses.
+
 ## Intent and constraints
 
 Implement the completed Flue 2 spike in production code and merge locally. Prefer native Flue facilities over framework-gap code. Preserve product behavior and safety boundaries. No push, deployment, production data mutation, or real Slack posts are authorized by this implementation request. Any real model canary uses only `zai/glm-5.3-flash`.
@@ -39,7 +41,7 @@ Activity receipts must not overwrite the final answer. The selected acknowledgem
 
 ## Cutover
 
-Keep the Durable Object class name and bump the existing instance-generation constant from 1 to 2 to start fresh Flue state. Do not delete/recreate the agent class using the unproven two-tag reset. Keep historical migration tags unchanged. Preserve the retired registry namespace with an inert exported class and no binding or storage mutation. D1 product data survives; native conversation state cold-starts using existing Slack/D1 context.
+Keep the Durable Object class name and bump the existing instance-generation constant from 1 to 2 to start fresh Flue state. Do not delete/recreate the agent class using the unproven two-tag reset. Keep historical migration tags unchanged. Preserve the retired registry namespace with an inert exported class and binding, with no storage mutation. D1 product data survives; native conversation state cold-starts using existing Slack/D1 context.
 
 Remove the six-hour generic heartbeat and manual route, not reminder/reflection/review clocks. Keep the internal-route token. Unknown cron expressions do nothing. Do not drop the pending-message table while old admitted messages may remain: document drained cutover and retain data until separately authorized cleanup.
 

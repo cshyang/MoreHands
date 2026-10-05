@@ -1,0 +1,57 @@
+{
+  "_comment": "MoreHands Slack app manifest. Create the app at https://api.slack.com/apps -> Create New App -> From a manifest, paste this, then replace REPLACE-WITH-YOUR-WORKER-URL with the URL setup.sh printed (e.g. https://hatchery.<account>.workers.dev). After install, copy the Bot User OAuth Token (xoxb-...) into .env.deploy as SLACK_BOT_TOKEN_DEFAULT and the bot user id into SLACK_BOT_ID, then re-run ./scripts/setup.sh secrets.",
+  "display_information": {
+    "name": "MoreHands",
+    "description": "Channel-scoped AI teammate.",
+    "background_color": "#1f2933"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "hatchery",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/hands",
+        "url": "https://REPLACE-WITH-YOUR-WORKER-URL/slack/commands",
+        "description": "MoreHands status and read-only views",
+        "usage_hint": "status | runs | reminders | skills | help",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "commands",
+        "channels:history",
+        "channels:read",
+        "groups:history",
+        "im:history",
+        "mpim:history",
+        "chat:write",
+        "chat:write.customize",
+        "reactions:write",
+        "users:read",
+        "files:read",
+        "files:write"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://REPLACE-WITH-YOUR-WORKER-URL/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

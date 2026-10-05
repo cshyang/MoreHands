@@ -22,6 +22,7 @@ import { fetchWithTimeout, jsonMessageOrText } from '../providers/http';
 import type { D1Like } from '../skills/repository';
 import { RUNNER_CONTRACT_VERSION, RunnerDispatchSchema, type RunnerDispatch } from './runner-contract';
 import { createAgentRunChannelNotifications } from './events';
+import { reserveIngressBudget, reserveIngressBudgetShare } from '../slack/ingress-budget';
 import {
   claimRunForDispatch,
   failStaleRunningRun,
@@ -52,7 +53,7 @@ export interface RunnerDispatchDeps {
   /** Per-run, freshly-minted GitHub token (App installation token via the connection broker). Preferred
    *  over the static githubToken — resolved on every dispatch attempt, so retries/continuations get a
    *  fresh token. githubToken stays as the transition fallback (RUNNER_GITHUB_PAT_TEMP). */
-  resolveGithubToken?: (run: AgentRun) => Promise<string | null>;
+  resolveGithubToken?: (run: AgentRun, db?: D1Like) => Promise<string | null>;
   runnerToken?: string; // callback auth: the runner echoes this on its callbacks
   moreHandsPublicUrl?: string; // absolute origin Trigger calls back to (REQUIRED — callback is external)
   fetch?: typeof fetch;
@@ -129,8 +130,8 @@ export function buildRunnerDispatch(run: AgentRun, deps: RunnerDispatchDeps): Ru
 
 /** Pick the GitHub token for a dispatch: the per-run connection token (App installation token via the
  *  broker), else the transition PAT. Resolved fresh on every attempt — the token is never persisted. */
-export async function resolveDispatchGithubToken(run: AgentRun, deps: RunnerDispatchDeps): Promise<string | null> {
-  return (await deps.resolveGithubToken?.(run)) ?? deps.githubToken ?? null;
+export async function resolveDispatchGithubToken(run: AgentRun, deps: RunnerDispatchDeps, db?: D1Like): Promise<string | null> {
+  return (await deps.resolveGithubToken?.(run, db)) ?? deps.githubToken ?? null;
 }
 
 /**
@@ -204,7 +205,7 @@ async function dispatchClaimedRun(
     // Resolve the GitHub token here (post-claim → only the claim winner pays the Nango round-trip; not
     // persisted, so each attempt mints fresh). buildRunnerDispatch stays a sync pure mapping — we just
     // override its githubToken with the resolved one.
-    const githubToken = await resolveDispatchGithubToken(run, deps);
+    const githubToken = await resolveDispatchGithubToken(run, deps, db);
     if (!githubToken) {
       // No connection token and no PAT. Retryable so it self-heals once the project connects a GitHub
       // App; the attempt cap eventually fails it with this clear reason instead of queuing forever.
@@ -268,49 +269,56 @@ export async function reconcileAgentRuns(
   const now = clock.now?.() ?? Date.now();
   const summary: ReconcileSummary = { reclaimed: 0, timedOut: 0, dispatched: 0, failed: 0, skipped: 0 };
 
-  // 1. Reclaim dispatchers that claimed then died — the lease expired.
-  const dispatchLeaseCutoff = now - DISPATCH_LEASE_MS;
-  for (const run of await listStaleDispatchingRuns(db, dispatchLeaseCutoff, RECONCILE_SWEEP_LIMIT)) {
-    const reclaimed = await requeueStaleDispatchingRun(db, run.id, dispatchLeaseCutoff, clock);
-    if (reclaimed) summary.reclaimed++;
-  }
+  // Per-record maxima include primary readbacks; scopes are reserved before any mutation.
+  const reclaim = reserveIngressBudgetShare(db, 3);
+  if (reclaim) try {
+    for (const run of await listStaleDispatchingRuns(reclaim.db, now - DISPATCH_LEASE_MS, RECONCILE_SWEEP_LIMIT)) {
+      const operation = reserveIngressBudget(reclaim.db, 2);
+      if (!operation) break;
+      try { if (await requeueStaleDispatchingRun(operation.db, run.id, now - DISPATCH_LEASE_MS, clock)) summary.reclaimed++; }
+      finally { operation.release(); }
+    }
+  } finally { reclaim.release(); }
 
-  // 2. Time out running runs whose runner went dark.
-  const heartbeatCutoff = now - RUNNING_STALE_MS;
-  for (const run of await listStaleRunningRuns(db, heartbeatCutoff, RECONCILE_SWEEP_LIMIT)) {
-    const failed = await failStaleRunningRun(db, run.id, heartbeatCutoff, clock);
-    if (!failed) continue;
-    await createAgentRunChannelNotifications(
-      db,
-      {
-        projectId: failed.projectId,
-        runId: failed.id,
-        notificationType: 'failed',
-        linearTargetRef: failed.linearIssueId ?? failed.linearIdentifier ?? null,
-      },
-      clock,
-    ).catch(() => {});
-    summary.timedOut++;
-  }
+  const timeout = reserveIngressBudgetShare(db, 2);
+  if (timeout) try {
+    for (const run of await listStaleRunningRuns(timeout.db, now - RUNNING_STALE_MS, RECONCILE_SWEEP_LIMIT)) {
+      const operation = reserveIngressBudget(timeout.db, 8); // UPDATE/readback + two notification insert/readbacks
+      if (!operation) break;
+      try {
+        const failed = await failStaleRunningRun(operation.db, run.id, now - RUNNING_STALE_MS, clock);
+        if (!failed) continue;
+        await createAgentRunChannelNotifications(operation.db, { projectId: failed.projectId, runId: failed.id,
+          notificationType: 'failed', linearTargetRef: failed.linearIssueId ?? failed.linearIdentifier ?? null }, clock).catch(() => {});
+        summary.timedOut++;
+      } finally { operation.release(); }
+    }
+  } finally { timeout.release(); }
 
-  // 3. Dispatch the queued backlog (including anything just reclaimed in step 1). Run the batch in
-  // PARALLEL: each dispatch is a Trigger HTTP call with a 12s timeout, so doing 10 sequentially could
-  // blow the Worker request budget. Claims are atomic (CAS), so parallel dispatch is safe.
-  const outcomes = await Promise.all(
-    (await listDispatchableRuns(db, RECONCILE_DISPATCH_LIMIT)).map(async (run): Promise<'dispatched' | 'failed' | 'skipped'> => {
-      if (run.dispatchAttempts >= DISPATCH_MAX_ATTEMPTS) {
-        await updateAgentRun(
-          db,
-          { id: run.id, status: 'failed', error: `dispatch failed after ${run.dispatchAttempts} attempts`, lastDispatchError: run.lastDispatchError ?? 'attempt cap reached' },
-          clock,
-        );
-        return 'failed';
-      }
-      const result = await claimAndDispatchRun(db, run.id, deps, clock);
-      return result.dispatched ? 'dispatched' : result.status === 'failed' ? 'failed' : 'skipped';
-    }),
-  );
-  for (const outcome of outcomes) summary[outcome]++;
-
+  const dispatches = reserveIngressBudgetShare(db, 1);
+  if (dispatches) try {
+    const jobs: Promise<'dispatched' | 'failed' | 'skipped'>[] = [];
+    for (const run of await listDispatchableRuns(dispatches.db, RECONCILE_DISPATCH_LIMIT)) {
+      // Acquire synchronously before launching parallel work; one run cannot borrow another's slots.
+      const operation = reserveIngressBudget(dispatches.db, run.dispatchAttempts >= DISPATCH_MAX_ATTEMPTS ? 3 : 10);
+      if (!operation) break;
+      jobs.push((async () => {
+        try {
+          if (run.dispatchAttempts >= DISPATCH_MAX_ATTEMPTS) {
+            await updateAgentRun(operation.db, { id: run.id, status: 'failed',
+              error: `dispatch failed after ${run.dispatchAttempts} attempts`,
+              lastDispatchError: run.lastDispatchError ?? 'attempt cap reached' }, clock);
+            return 'failed' as const;
+          }
+          const result = await claimAndDispatchRun(operation.db, run.id, deps, clock);
+          return result.dispatched ? 'dispatched' as const : result.status === 'failed' ? 'failed' as const : 'skipped' as const;
+        } finally { operation.release(); }
+      })());
+    }
+    const outcomes = await Promise.allSettled(jobs);
+    for (const outcome of outcomes) if (outcome.status === 'fulfilled') summary[outcome.value]++;
+    const failed = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected');
+    if (failed) throw failed.reason;
+  } finally { dispatches.release(); }
   return summary;
 }

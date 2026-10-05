@@ -1,7 +1,7 @@
 // Nightly reflection ("REM"): consolidate the day's experience into durable memory, the way
 // sleep distils episodic experience into semantic memory. Two episodic streams feed it:
 //   1. CONVERSATIONS — the `messages` table (logged by app.ts + the reply tool).
-//   2. THE RUN RECORD — terminal `agent_runs_m1` rows (what the agent DID: dispatched coding
+//   2. THE RUN RECORD — terminal `agent_runs` rows (what the agent DID: dispatched coding
 //      runs, their outcomes and errors). Rung one of the reflection ladder: operational
 //      patterns become MEMORY only — no skills, no self-filed issues, no fixes from REM.
 // Once a night a sweep hands each project's new batch to a REM turn that calls
@@ -34,18 +34,48 @@ export interface LogMessageInput {
   /** True when the ingest-time heuristic flags this as an answerable question/request — the
    *  proactive review's (Layer 4) Tier-1 wake signal. Computed by isReviewCandidate in review.ts. */
   reviewCandidate?: boolean;
+  /** Stable ingress effect id. Present only for durable writes guarded by migration 0031. */
+  deliveryId?: string;
+  /** Frozen ingestion time for retries; defaults to the current clock for legacy callers. */
+  now?: number;
 }
 
 // Best-effort transcript logging. Called from app.ts (inbound) and the reply tool (outbound).
 export async function logMessage(db: D1Like, m: LogMessageInput): Promise<void> {
   const text = m.text.trim();
   if (!text) return;
+  const createdAt = m.now ?? Date.now();
+  if (m.deliveryId === undefined) {
+    await db
+      .prepare(
+        'INSERT INTO messages(project_id, conversation_id, sender_id, role, text, ambient, review_candidate, created_at) VALUES(?,?,?,?,?,?,?,?)',
+      )
+      .bind(m.projectId, m.conversationId, m.senderId, m.role, text, m.ambient ? 1 : 0, m.reviewCandidate ? 1 : 0, createdAt)
+      .run();
+    return;
+  }
+
   await db
     .prepare(
-      'INSERT INTO messages(project_id, conversation_id, sender_id, role, text, ambient, review_candidate, created_at) VALUES(?,?,?,?,?,?,?,?)',
+      'INSERT INTO messages(project_id, conversation_id, sender_id, role, text, ambient, review_candidate, created_at, delivery_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(delivery_id) DO NOTHING',
     )
-    .bind(m.projectId, m.conversationId, m.senderId, m.role, text, m.ambient ? 1 : 0, m.reviewCandidate ? 1 : 0, Date.now())
+    .bind(m.projectId, m.conversationId, m.senderId, m.role, text, m.ambient ? 1 : 0, m.reviewCandidate ? 1 : 0, createdAt, m.deliveryId)
     .run();
+  const existing = await db
+    .prepare('SELECT project_id, conversation_id, sender_id, role, text, ambient FROM messages WHERE delivery_id=?')
+    .bind(m.deliveryId)
+    .first<{ project_id: string; conversation_id: string; sender_id: string; role: string; text: string; ambient: number }>();
+  if (
+    !existing
+    || existing.project_id !== m.projectId
+    || existing.conversation_id !== m.conversationId
+    || existing.sender_id !== m.senderId
+    || existing.role !== m.role
+    || existing.text.trim() !== text
+    || existing.ambient !== (m.ambient ? 1 : 0)
+  ) {
+    throw new Error('transcript delivery ID conflict');
+  }
 }
 
 /** Has the agent itself ever posted in this conversation? The engage policy's thread-participation
@@ -122,7 +152,7 @@ export async function projectsWithUnreflectedRuns(db: D1Like, now: number = Date
   const { results } = await db
     .prepare(
       `SELECT r.project_id AS project_id
-         FROM agent_runs_m1 r
+         FROM agent_runs r
          LEFT JOIN reflection_state s ON s.project_id = r.project_id
         WHERE r.completed_at IS NOT NULL
           AND r.status IN ${TERMINAL_RUN_STATUSES}
@@ -156,7 +186,7 @@ export async function takeUnreflectedRuns(db: D1Like, projectId: string, now: nu
   const { results } = await db
     .prepare(
       `SELECT status, source_type, linear_identifier, target_repo, kit, summary, error, pr_url, completed_at
-         FROM agent_runs_m1
+         FROM agent_runs
         WHERE project_id=? AND completed_at IS NOT NULL AND completed_at>? AND status IN ${TERMINAL_RUN_STATUSES}
         ORDER BY completed_at LIMIT ${RUN_BATCH_LIMIT}`,
     )

@@ -1,5 +1,7 @@
 # Flue 2 Native-First Audit: what custom code to delete
 
+**Historical reference:** This document describes an earlier runtime or experiment. Current production uses Flue 2.2.2; see the [completed cutover](../operations/2026-10-05-flue-cutover.md) and [deployment runbook](../deployment.md). Earlier reset, replay and deployment proposals are not current operating instructions. Unimplemented follow-up ideas remain proposals.
+
 **Date**: 2026-10-01
 **Branch**: `flue-2-spike`
 **Rule set by the owner**: stay native Flue. Custom code exists only to fill gaps Flue could not cover. If Flue 2.2.2 covers the need cleanly, delete ours.

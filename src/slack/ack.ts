@@ -54,6 +54,7 @@ export interface PostWorkingAckDeps {
   postMessage?: SlackPostMessageReturningTs;
   log?: (message: string) => void;
   timeoutMs?: number;
+  trackPost?: (promise: Promise<unknown>) => void;
 }
 
 // Ceiling on how long we'll wait for the ack's ts before giving up and dispatching anyway. Keeps
@@ -94,7 +95,9 @@ export async function postWorkingAck(
 
   // .catch on the post itself (not a try/catch around the race) so a rejection AFTER the timeout has
   // already won can't surface as an unhandled rejection.
-  const post = postMessage(token, channel, text, threadTs, identity).catch((e) => {
+  const rawPost = postMessage(token, channel, text, threadTs, identity);
+  deps.trackPost?.(rawPost);
+  const post = rawPost.catch((e) => {
     log(`[ack] working-ack failed to post: ${e instanceof Error ? e.message : 'error'}`);
     return undefined;
   });

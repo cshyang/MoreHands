@@ -39,6 +39,11 @@
       ]
     }
   },
+  "metadata": {
+    "event_subscriptions": [
+      { "event_type": "morehands_reply", "schema": {} }
+    ]
+  },
   "settings": {
     "event_subscriptions": {
       "request_url": "https://REPLACE-WITH-YOUR-WORKER-URL/slack/events",

@@ -33,7 +33,11 @@
   "durable_objects": {
     "bindings": [
       // Workspace sandbox: real container with shell/fs/git for coordinator workspace tasks.
-      { "name": "SANDBOX", "class_name": "Sandbox" }
+      { "name": "SANDBOX", "class_name": "Sandbox" },
+      // Retired registry: native 2.2.2's vite plugin no longer injects FLUE_REGISTRY
+      // (beta CLI did). The class stays exported from src/cloudflare.ts; keeping the
+      // binding preserves its existing SQLite storage across the cutover.
+      { "name": "FLUE_REGISTRY", "class_name": "FlueRegistry" }
     ]
   },
   "containers": [

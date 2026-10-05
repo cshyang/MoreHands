@@ -6,6 +6,7 @@ import type { D1Like } from '../skills/repository';
 import { stageReply, deliverReplyPart, type ReplyTransport } from './reply-outbox';
 import * as replies from './reply-outbox';
 import { SlackApiError } from './post';
+import { withIngressBudget, ingressBudget } from './ingress-budget';
 
 const { test, run } = createTestRunner();
 const target = { projectId: 'P', agentSlug: 'default', conversationId: 'C', provider: 'slack' as const,
@@ -210,5 +211,40 @@ test('terminal receipt repair survives a failed edit and stops after success', a
     assert.equal(f.sql.prepare('SELECT status FROM slack_reply_trackers').get()?.status, 'failed');
     assert.equal(f.state().length, 0);
   } finally { globalThis.fetch = original; }
+});
+test('insufficient delivery allocation leaves pending state without a claim or post', async () => {
+  const f = fixture();
+  try {
+    await stageReply(f.db, input);
+    const db = withIngressBudget({ DB:f.db },5).DB;
+    assert.equal(await deliverReplyPart(db,{TOKEN:'fixture'},id,{transport:f.wire}),'waiting');
+    assert.equal(ingressBudget(db)!.used,0); assert.equal(f.state()[0].status,'pending'); assert.deepEqual(f.calls,[]);
+  } finally { f.sql.close(); }
+});
+test('top-level second-part delivery reserves root reads and lost-save fallback before posting', async () => {
+  const f = fixture();
+  try {
+    const rootTarget = { ...target, externalConversationId: null };
+    await stageReply(f.db,{...input,target:rootTarget});
+    f.sql.exec("UPDATE slack_reply_outbox SET status='sent',posted_ts='1.0'");
+    f.sql.prepare(`INSERT INTO slack_reply_outbox(delivery_id,instance_id,response_id,project_id,conversation_id,
+      target_json,part_index,text,created_at,updated_at) VALUES('i:r:1','i','r','P','C',?,1,'part two',0,0)`)
+      .run(JSON.stringify(rootTarget));
+    const prepare = f.db.prepare.bind(f.db); let lost = false;
+    f.db.prepare = query => ({ bind: (...values) => {
+      const actual = prepare(query).bind(...values);
+      return { ...actual, run: async () => {
+        const result = await actual.run();
+        if (!lost && query.includes("SET status='sent'")) { lost = true; throw new Error('lost committed save'); }
+        return result;
+      } };
+    } });
+    const db = withIngressBudget({DB:f.db},6).DB;
+    await deliverReplyPart(db,{TOKEN:'fixture'},'i:r:1',{transport:f.wire});
+    assert.equal(ingressBudget(db)!.used,6); assert.equal(ingressBudget(db)!.reserved,0);
+    assert.equal(f.state()[1].status,'sent'); assert.deepEqual(f.calls,['post:i:r:1']);
+    await deliverReplyPart(withIngressBudget({DB:f.db},6).DB,{TOKEN:'fixture'},'i:r:1',{transport:f.wire});
+    assert.deepEqual(f.calls,['post:i:r:1']);
+  } finally { f.sql.close(); }
 });
 await run();

@@ -1,4 +1,5 @@
 export interface SlackEventEnvelope {
+  api_app_id?: string;
   type?: string;
   challenge?: string;
   team_id?: string;
@@ -24,6 +25,14 @@ export interface SlackFileMeta {
   name: string | null;
   mimetype: string | null;
   size: number | null;
+}
+
+export function slackFileMetadata(value: unknown): SlackFileMeta[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((file) => file && typeof file.id === 'string' && file.id.trim())
+    .map((file) => ({ id: file.id.trim(), name: typeof file.name === 'string' ? file.name : null,
+      mimetype: typeof file.mimetype === 'string' ? file.mimetype : null,
+      size: typeof file.size === 'number' && Number.isFinite(file.size) && file.size >= 0 ? file.size : null }));
 }
 
 export interface SlackUserMessageEvent {
@@ -61,14 +70,7 @@ export function slackUserMessageEvent(body: SlackEventEnvelope): SlackUserMessag
   }
   if (ev.subtype && ev.subtype !== 'file_share') return null;
 
-  const files = (ev.files ?? [])
-    .filter((f) => typeof f?.id === 'string' && f.id.length > 0)
-    .map((f) => ({
-      id: f.id as string,
-      name: typeof f.name === 'string' ? f.name : null,
-      mimetype: typeof f.mimetype === 'string' ? f.mimetype : null,
-      size: typeof f.size === 'number' && Number.isFinite(f.size) ? f.size : null,
-    }));
+  const files = slackFileMetadata(ev.files);
 
   return {
     channel: ev.channel,
@@ -83,4 +85,30 @@ export function slackUserMessageEvent(body: SlackEventEnvelope): SlackUserMessag
 
 export function slackEventId(body: SlackEventEnvelope, ev: SlackUserMessageEvent): string {
   return body.event_id ?? `${ev.channel}:${ev.ts}`;
+}
+
+/** Only call after signature verification of strictly decoded, bounded original bytes. */
+export async function verifiedIngressEvent(raw: string, body: SlackEventEnvelope, event: SlackUserMessageEvent): Promise<import('./ingress-store').VerifiedIngressEvent> {
+  if (typeof event.channel !== 'string' || !event.channel || typeof event.ts !== 'string'
+    || (event.user !== undefined && typeof event.user !== 'string') || (event.text !== undefined && typeof event.text !== 'string')
+    || (event.thread_ts !== undefined && typeof event.thread_ts !== 'string')
+    || (event.channelType !== undefined && typeof event.channelType !== 'string')
+    || typeof body.team_id !== 'string' || !body.team_id || typeof body.event_id !== 'string' || !body.event_id
+    || /[\s\u0000-\u001f\u007f]/.test(`${body.team_id}:${body.event_id}`)
+    || `slack:${body.team_id}:${body.event_id}`.length > 256
+    || !/^\d+\.\d+$/.test(event.ts) || (event.thread_ts !== undefined && !/^\d+\.\d+$/.test(event.thread_ts))) {
+    throw new Error('Invalid verified Slack event identity');
+  }
+  const bytes = new TextEncoder().encode(raw);
+  if (bytes.length > 1_000_000) throw new Error('Slack event exceeds acceptance bound');
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2,'0')).join('');
+  const eventJson = JSON.stringify({ type: 'event_callback', team_id: body.team_id, event_id: body.event_id,
+    ...(typeof body.api_app_id === 'string' ? { api_app_id: body.api_app_id } : {}),
+    event: { type: 'message', channel: event.channel, ts: event.ts,
+      ...(event.thread_ts ? { thread_ts: event.thread_ts } : {}), ...(event.user ? { user: event.user } : {}),
+      ...(typeof event.text === 'string' ? { text: event.text } : {}),
+      ...(event.channelType ? { channel_type: event.channelType } : {}),
+      ...(event.files?.length ? { files: event.files } : {}) } });
+  if (new TextEncoder().encode(eventJson).length > 1_000_000) throw new Error('Slack event exceeds sanitized bound');
+  return { key: `${body.team_id}:${body.event_id}`, teamId: body.team_id, eventId: body.event_id, digest, eventJson };
 }

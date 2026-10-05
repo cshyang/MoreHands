@@ -18,6 +18,7 @@ import {
   assertValidModel,
   DEFAULT_MODEL,
   hasCataloguedModel,
+  modelSupportsVision,
   agentInstanceId,
   parseAgentInstanceId,
   type BindingRecord,
@@ -238,6 +239,14 @@ test('native catalog guards the approved flash default without claiming performa
   assert.doesNotThrow(() => assertValidModel(DEFAULT_MODEL));
   assert.equal(hasCataloguedModel('zai/not-a-model'), false);
   assert.equal(hasCataloguedModel('unknown/glm-5.3-flash'), false);
+});
+
+test('modelSupportsVision reads catalog input modality, defaulting to no vision', () => {
+  assert.equal(modelSupportsVision(DEFAULT_MODEL), true); // glm-5.3-flash catalog input: text+image
+  assert.equal(modelSupportsVision('zai/glm-5.3'), false); // text-only sibling
+  assert.equal(modelSupportsVision('zai/not-a-model'), false);
+  assert.equal(modelSupportsVision('unknown/glm-5.3-flash'), false);
+  assert.equal(modelSupportsVision(undefined), true); // unpinned resolves to DEFAULT_MODEL
 });
 
 test('assertValidModel: validated and unpinned (null/undefined/empty) all pass', async () => {

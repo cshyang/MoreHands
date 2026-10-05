@@ -1,7 +1,8 @@
 name: deploy
 
 # CD for MoreHands. Push to main → gate → (guard migrations) → build → deploy → smoke.
-# Code deploys are reversible (`wrangler rollback`); the irreversible part — D1 migrations — is NOT
+# Code rollback across Flue generations requires matching-runtime drain and delivery evidence;
+# `wrangler rollback` alone cannot restore Durable Object formats. D1 migrations are NOT
 # auto-applied here (some are destructive rebuilds against the single prod DB). The guard below stops
 # a deploy whenever a migration is unapplied, so prod code never runs ahead of its schema.
 #
@@ -47,7 +48,7 @@ jobs:
       # single prod D1. If any are unapplied, stop — apply them (with a backup) first, then re-run.
       - name: Guard against unapplied D1 migrations
         run: |
-          out="$(npx wrangler d1 migrations list hatchery-skills --remote 2>&1 || true)"
+          out="$(npx wrangler d1 migrations list hatchery-skills --remote 2>&1)"
           echo "$out"
           if echo "$out" | grep -qE '[0-9]{4}_.*\.sql'; then
             echo "::error::Unapplied D1 migrations detected. Apply them manually (review for destructive ops, take a backup): scripts/setup.sh migrate — then push again."
@@ -58,11 +59,15 @@ jobs:
       # ── Build + deploy ───────────────────────────────────────────────────────
       # (The hatchery-ticker worker is retired — src/cloudflare.ts hosts the cron in-Worker.)
       - name: Build (Flue → Cloudflare)
-        run: npm run build
+        env:
+          MOREHANDS_BUILD_CUTOVER: fenced
+        run: |
+          npm run build
+          npx tsx scripts/check-cutover-config.ts --mode fenced --runtime 2.2.2 --config dist/hatchery/wrangler.json
       - name: Deploy hatchery
         run: |
           set -o pipefail   # else `| tee` swallows wrangler's exit code → a failed deploy looks green
-          npx wrangler deploy --config dist/hatchery/wrangler.json | tee deploy.out
+          npx wrangler deploy --config dist/hatchery/wrangler.json --keep-vars --containers-rollout=none | tee deploy.out
 
       # ── Smoke: did the worker actually come up? (best-effort for now) ─────────
       - name: Smoke check

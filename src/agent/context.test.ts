@@ -10,7 +10,7 @@ const { test, run } = createTestRunner();
 
 test('gateway signal body preserves engaged input for trusted thread and acknowledgement parsing', () => {
   const input = { message: 'hello', conversationId: 'slack:T:C:1', ackMessageTs: '1.2' };
-  const delivery = projectDispatchMessage(input, {});
+  const delivery = projectDispatchMessage(agentInstanceId('P'), input, {} as import('./context').ProjectContext);
   assert.notEqual(typeof delivery, 'string');
   assert.deepEqual(parseProjectDispatchInput((delivery as { body: string }).body), input);
   assert.deepEqual(parseProjectDispatchInput(JSON.stringify(input)), input);

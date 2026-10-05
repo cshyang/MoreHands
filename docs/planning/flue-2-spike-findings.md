@@ -1,5 +1,7 @@
 # Flue 2.2.2 Spike Findings (2026-09-30)
 
+**Historical reference:** This document describes an earlier runtime or experiment. Current production uses Flue 2.2.2; see the [completed cutover](../operations/2026-10-05-flue-cutover.md) and [deployment runbook](../deployment.md). Earlier reset, replay and deployment proposals are not current operating instructions. Unimplemented follow-up ideas remain proposals.
+
 **Verdict: viable, with a rebuild of the agent initializer and a rewrite of every tool's schema.** Nothing found blocks the upgrade. The stream-journal patch is no longer needed, `observe()` survives with a small rename, and we do not use the built-in tools. Two items are bigger than the plan says. First, the agent cannot load D1 before its first model call. D1 data needed on turn one has to come from the dispatcher. Second, all 23 tool files (232 `Type.*` sites) must move from TypeBox `parameters`/`execute` to Valibot `input`/`run({data})`. 2.x throws on the old shape.
 
 Spike project: `spikes/flue2/` (own `package.json`, `@flue/runtime` and `@flue/vite` 2.2.2, vite 8.3, `@cloudflare/vite-plugin` 1.62, wrangler 4.144, pi-ai pinned to 0.87.1 to match the runtime's copy). Everything ran locally under `vite dev` (miniflare, local D1, scripted fake models). No real model, Slack, D1 or Cloudflare account was touched. Helper scripts are in `spikes/flue2/scripts/`.

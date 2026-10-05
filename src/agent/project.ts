@@ -4,7 +4,8 @@ import { env as workerEnv } from 'cloudflare:workers';
 import * as v from 'valibot';
 import { defineTool, useDelivery, useInitialData, useModel, useTool, type AgentProps, type ToolDefinition } from '@flue/runtime';
 import { parseAgentInstanceId, resolveModel } from '../project/bindings';
-import { projectContextForDelivery, parseProjectDispatchInput, isEngagedProjectInput, type ProjectContext } from './context';
+import type { ProjectContext } from './context';
+import { decodeProjectDelivery } from './delivery';
 import { ensureNativeModelAuth } from './providers';
 import { personaTools } from '../project/persona';
 import { overhearingTools } from '../project/overhearing';
@@ -40,28 +41,25 @@ export { replyRuntime as cloudflare } from '../slack/reply-runtime';
 // plus token ref from trusted config; skills/reminders/memory are scoped to this projectId.
 // The model controls only the content, never the destination or another project's data.
 //
-// Gateway reads D1 before dispatch and carries a metadata-only snapshot on EVERY signal.
-// This synchronous render sees fresh context before useModel chooses the submission's model.
+// Gateway reads D1 before dispatch and carries current metadata on every product delivery.
+// Image user bodies expose the serializable snapshot; resolved credentials remain Worker-only.
 export function Project({ id }: AgentProps) {
   const { projectId, slug } = parseAgentInstanceId(id);
   const env = workerEnv as Record<string, unknown>;
   ensureNativeModelAuth(env);
   const db = env.DB as D1Like | undefined;
   const delivery = useDelivery();
-  const attrs = delivery.kind === 'signal' ? delivery.attributes : undefined;
   const initial = useInitialData<ProjectContext | undefined>();
-  const context = projectContextForDelivery(id, attrs?.snapshot, initial);
+  const admitted = decodeProjectDelivery(id, delivery, initial);
+  const context = admitted?.context;
   const binding = context?.binding;
   const model = resolveModel(binding?.model);
   useModel(model);
-  if (!binding || !context) return `No active binding for project "${projectId}". Do not attempt to post anywhere.`;
+  if (!admitted || !binding || !context) return `No valid admitted input for project "${projectId}". Do not attempt to post anywhere.`;
 
   const { persona, personality, catalog, memoryBlock } = context;
-  const input = delivery.kind === 'signal' ? parseProjectDispatchInput(attrs?.input ?? delivery.body) : null;
-  const engaged = isEngagedProjectInput(attrs, input);
-  // Destination and acknowledgement are read from trusted admitted input, never tool arguments.
-  const conversationId = attrs?.conversationId ?? (typeof input?.conversationId === 'string' ? input.conversationId : '');
-  const ackMessageTs = attrs?.ackMessageTs ?? (typeof input?.ackMessageTs === 'string' ? input.ackMessageTs : undefined);
+  // Destination and acknowledgement are read from trusted admission, never tool arguments.
+  const { input, engaged, conversationId, ackMessageTs } = admitted;
 
   const connectionRuntime = connectionRuntimeFromSnapshot({
     db,

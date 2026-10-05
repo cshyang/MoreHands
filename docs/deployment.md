@@ -95,25 +95,69 @@ token minted per repo/run.
 
 ## Flue 2 cutover
 
-A local merge is not a deployment. Review and run this checklist separately:
+The production cutover completed on 2026-10-05, including controlled reopening.
+See the [completion record](operations/2026-10-05-flue-cutover.md) and
+[archived plans](superpowers/plans/archive/2026-10-05-flue-cutover/README.md).
+Flue runtime/Vite remain pinned to `2.2.2` and Pi AI to `0.87.1`.
 
-1. Pause ingress and let current turns finish before deploying. Inspect the old `pending_messages`
-   table and drain all `status='pending'` rows through the old Worker before cutover. The new Worker
-   no longer parks or sweeps these messages. Keep the table for inspection; dropping it needs separate
-   authorization. Do not move active beta turns across the incompatible Flue state format.
-2. Back up D1, then apply new migrations before enabling the new Worker. Never edit applied migration files.
-3. Set `ZAI_API_KEY` (or the legacy `ZAI_CODING_API_KEY`) and retain `HEARTBEAT_TOKEN`:
-   reminders, reflection, review, and reconciliation still use guarded internal routes.
-4. Build with `npm run build`; inspect `dist/hatchery/wrangler.json` and run Wrangler's deploy
-   dry-run. Keep `Project` / `FlueProjectAgent` / `FLUE_PROJECT_AGENT` names. The instance generation
-   increments to start fresh Flue conversations; D1 memories, transcripts, skills, and targets survive.
-5. Deploy only after explicit authorization. The six-hour generic heartbeat is removed; the
-   minute reminder scan, nightly reflection, and reconciliation clock remain.
-6. Canary one channel with `zai/glm-5.3-flash`: single message, joined burst, lookup tool,
-   attachment authorization, quiet background run, and restart during delivery.
-7. Inspect `slack_reply_outbox`. `uncertain` means a new post may have succeeded but cannot
-   be positively matched by its Slack metadata. Do not reset it to pending blindly. A confirmed
-   history match repairs delivery; an unresolved row needs operator inspection.
+For subsequent production releases, CI uses the existing admission fence and preserves
+live variables and container state. It stops if the remote migration check fails or
+finds an unapplied migration. Migrations are reviewed and applied manually, in order,
+with a backup; CI never applies them automatically.
+
+```bash
+npm run typecheck
+npm test
+MOREHANDS_BUILD_CUTOVER=fenced npm run build
+npx tsx scripts/check-cutover-config.ts --mode fenced --runtime 2.2.2 --config dist/hatchery/wrangler.json
+npx wrangler deploy --config dist/hatchery/wrangler.json --dry-run --containers-rollout=none
+npx wrangler deploy --config dist/hatchery/wrangler.json --keep-vars --containers-rollout=none
+```
+
+A build without the fenced flag is for ordinary fresh-account setup, not the canonical
+production release. Preserve `Project`, `FlueProjectAgent`, `FLUE_PROJECT_AGENT`, the
+retired registry binding, and every historical migration tag. Do not delete/recreate
+Durable Object classes or contact legacy storage with the native runtime.
+
+When a release needs a drain, close admissions with compare-and-set, finish registered
+producers, then collect fresh complete fleet, product and delivery observations. Unknown
+coverage or unresolved delivery holds the gate. Reopen only under the authorized release
+scope after those checks pass. HTTP 503 is rejection, not durable buffering; review
+unadmitted provider events deliberately rather than guessing identities or replaying them.
+After native activity, prefer a forward fix. A code rollback or D1 restore alone cannot
+restore compatible Durable Object state.
+
+The installed Slack manifest must register `morehands_reply` under top-level
+`metadata.event_subscriptions`, preserving its real URLs, scopes and other registrations.
+Verify it with a real trusted-bot post/history match. The checked-in manifest is a template.
+Only `zai/glm-5.3-flash` is permitted for live cutover canaries.
+
+Admin diagnostics use `ADMIN_CONNECTIONS_TOKEN` via `x-morehands-admin-token`, not heartbeat/runner
+credentials. `GET /__admin/cutover/status` returns primary-bound D1 counts and separate informational
+backlog. `POST /__admin/cutover/admissions` accepts only `{state,expectedRevision}` with compare-and-set;
+400 means invalid, 409 stale, 503 unavailable. `POST /__admin/cutover/instance` accepts a reviewed
+namespace/object/name/runtime association, derives the name's ID before object contact, and rejects
+cross-generation or opaque unverified entries. It never calls setName or wake, but matching-runtime
+startup may still run. No arbitrary-ID bypass is provided.
+
+`POST /__admin/cutover/identities` accepts only `{namespaceId,instanceNames}` for the configured
+namespace, with 1–100 distinct nonempty names of at most 1024 characters each (no edge whitespace
+or control characters). It returns exact name-to-ID derivations using the bound namespace without
+obtaining a stub or opening object storage. Historical unsuffixed names are permitted for derivation
+only. A derived ID does **not** establish object existence, persisted runtime, generation, or idle
+state; compare it with the independent full listing and retain unresolved runtime associations.
+400 means invalid input/namespace, 503 unavailable, 200 a complete mapping with no partial results.
+
+The offline report reads explicit local JSON only:
+
+```bash
+npx tsx scripts/cutover-report.ts --input ./evidence.json
+```
+
+Exit 0 means coverage-qualified `observed-idle`, 2 blocked/unknown, 1 invalid data. Submitted evidence
+is not independently authenticated. **observed-idle is not deployment or rollback authorization**;
+namespace listings and native/D1 reads are not an atomic fleet snapshot. Local physical-alarm canaries
+prove natural idle cleanup/reconstruction only, not interrupted running-attempt recovery or production drain.
 
 Flue's native history is the answer source. One isolated adapter reads pinned Flue 2.2.2
 canonical records and admission metadata; upgrade it only with compatibility tests. Admission
@@ -121,10 +165,80 @@ metadata heals a lost dispatch receipt even before canonical input exists. An un
 submission with no canonical outcome closes visibly as failed, never with a fabricated answer.
 The external outbox stores only delivery parts.
 Engaged answers post below the working acknowledgement so a late progress edit cannot erase an answer.
-The retired `FlueRegistry` class remains exported without a binding or storage changes, preserving its
-historical namespace. New posts cannot be claimed exactly-once. Slack history
+The retired `FlueRegistry` class and binding remain inert without storage changes, preserving
+the historical namespace. New posts cannot be claimed exactly-once. Slack history
 access and returned message metadata are needed to reconcile a lost post response. No absence
 of a history match is treated as proof that a post was never accepted.
+
+## Durable Slack intake
+
+```mermaid
+flowchart LR
+  A[Verify signature and bound event] --> B[Atomic inbox and producer commit]
+  B --> C[HTTP 200]
+  B --> D[Leased product preparation]
+  D --> E[Immutable D1 request chunks]
+  E --> F[Exact keyed native Flue admission]
+  F --> G[Atomic tracker association and producer release]
+  G --> H[Existing native history and answer outbox recovery]
+```
+
+Migration `0033_slack_ingress.sql` is additive and native only; it is applied in canonical
+production. Fresh deployments must apply the ordered migrations before serving intake.
+Absent tables cause verified Slack work to return 503; closed intake does not durably buffer new
+work. Matching already committed duplicates remain recoverable while closed.
+
+HTTP 200 means the verified event and its producer have committed. It does not mean preparation,
+model execution, or answer delivery finished. Each lease holder uses SQL guards for product effects.
+The transcript reuses migration0031's unique `messages.delivery_id`. File grants have a persisted
+cursor so a later invocation can finish a bounded batch without losing ownership. Destination,
+epoch, persona, and acknowledgement intent freeze before external effects; a ready request includes
+the complete native message and context in at most twelve immutable BLOB chunks of at most
+1,000,000 bytes each. Exact stored bytes and the original key are replayed after an unknown admission.
+Native Flue remains the sole model execution, joining, and recovery engine.
+
+The webhook and its background recovery share one conservative 50-statement invocation budget.
+The scheduled handler shares that budget across all in-process reconciliation routes. It runs the
+four recovery phases sequentially and rotates first access using the scheduled tick timestamp.
+Whole-operation reservations protect readbacks and producer release before any effect; excess
+records stay durable. Each phase receives first access once per four healthy two-minute ticks,
+about eight minutes for an opportunity under saturation, without a backlog completion guarantee.
+One ingress record can advance both phases when it fits; otherwise it retains ownership for a fresh
+invocation. The existing two-minute cron is the recovery backstop. The private reconcile route accepts only
+an empty JSON object under the heartbeat token, with no caller-supplied native request or key.
+Preparation and handoff have separate capped backoff; eight unsuccessful claims retain a visible
+obligation for explicit disposition. Exhaustion never grants permission to release a producer.
+
+Acknowledgement `sending` or `uncertain` is repaired only by a unique positive history match with
+matching delivery metadata and trusted bot/app identity. The lookup covers at most two pages,
+bounded by the original event timestamp. Absence, unavailable history, duplicates, or mismatched
+metadata keep the obligation uncertain. A positive Slack rate-limit rejection can retry after its
+recorded delay; transport loss and 5xx do not permit a second post.
+
+Retain referenced request bytes, native and uncertain work, and failed diagnostics. Quiet completion
+removes the extra ingress event and file-checkpoint content while retaining its key/digest and status;
+the normal product transcript and authorized file rows follow their existing retention. Abandoned,
+unreferenced attempts may be removed only after 24 hours, checked integrity and live lease guards,
+and atomic chunk-before-manifest deletion. Cleanup is bounded and resumable; it is not enabled as
+a new automatic cron. Do not apply this policy to historical native evidence or reflection markers.
+
+Native diagnostics additionally require `slackIngressPending`, `slackIngressFailed`,
+`slackIngressAckUncertain`, and `slackIngressStorageInvalid`. Status hashes at most one outstanding
+published request; larger outstanding coverage is explicitly unknown. Missing tables and unavailable
+storage remain unknown. The old seven-counter product observation does not certify schema0033.
+Accepted ingress still needs independent tracker, outbox, native fleet, and delivery observations.
+
+The completed promotion included the full suite, actual emitted native image/ingress/crash
+proofs, physical alarm canary, local D1 tests and an explicitly isolated remote D1 probe.
+Remote acceptance trials stayed below Slack's three-second deadline, but measurements are
+not a permanent capacity guarantee. Retained payload growth still needs operational capacity
+review. See the completion record for measured sizes, headroom and memory limitations.
+
+The reflection query now reads production `agent_runs`; the separately approved historical
+reflection reconciliation is complete. Historical image obligations, installed Slack metadata,
+live pixel recognition, fleet/product/delivery observations and controlled reopening received
+independent disposition or positive verification before archival. Local tests or automated
+completion feedback do not grant production approval.
 
 ## Trigger.dev Runner
 
@@ -283,3 +397,31 @@ The `github-self_call_api` tool appears the moment the secret exists — `connec
 the env var, no deploy or restart. Related but separate: a tenant github connection can be opened
 for writes on the PROJECT repos by setting `methodPolicy: "get-post"` in its connection config
 (destructive verbs stay blocked; `"all"` is a deliberate per-connection operator decision).
+
+### Durable Slack ingress disposable remote proof
+
+Use the existing isolated worktree and an explicit fresh16-hex probe ID. The script has no production
+resource default. `--prepare` only builds a minimal Worker and private ignored credential; review its
+manifest before the explicitly authorized remote stages. The temporary Worker has one D1 binding,
+no native/container/Slack/model bindings and no crons.
+
+```bash
+npm run test:d1-remote-ingress-storage -- --prepare <16hex-probe-id>
+npm run test:d1-remote-ingress-storage -- --provision <absolute-manifest-path>
+npm run test:d1-remote-ingress-storage -- --deploy <absolute-manifest-path>
+npm run test:d1-remote-ingress-storage -- --run <absolute-manifest-path>
+npm run test:d1-remote-ingress-storage -- --cleanup <absolute-manifest-path>
+```
+
+`--resume` repeats an interrupted `proof-running` run under the same ID. Deliberate corruption trials
+stay failed closed across repeats. `--cleanup` is repeatable from `cleanup-requested`/`cleaned`, and
+requires the saved successful readback hash. It deletes only the probe's rows and restores original
+SQL guards atomically. State/results files are append-only. A recorded failed gate holds; interrupted
+provisioning with an unknown creation receipt also holds for evidence-based inspection. Do not guess
+ownership or edit a manifest to bypass a failed gate. Keep failed resources and evidence for review.
+
+The script records signed acceptance latency separately from large-request store/load latency and
+emitted statement counts. Capture Cloudflare memory quantiles and fresh DB size/headroom separately;
+sampled memory is not an exact peak measurement. With referenced payloads retained indefinitely,
+review retained-volume scenarios before opening production. Never run this capacity experiment
+against `hatchery-skills` or substitute it for the native fleet/delivery and authorized flash canary gates.

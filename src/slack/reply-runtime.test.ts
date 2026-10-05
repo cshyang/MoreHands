@@ -39,6 +39,8 @@ function fixture(agent?: () => string, env: Record<string, unknown> = {}) {
   const jobs: Promise<unknown>[] = [];
   native.exec('CREATE TABLE test_schedules(delay INTEGER,callback TEXT)');
   const storage = {
+    getAlarm: async () => null,
+    get: async () => undefined,
     sql: { exec(query: string, ...values: unknown[]) {
       const statement = native.prepare(query);
       const rows = statement.columns().length ? statement.all(...values as never[]) : (statement.run(...values as never[]), []);
@@ -138,6 +140,22 @@ function fixture(agent?: () => string, env: Record<string, unknown> = {}) {
     .batches.flatMap((batch) => batch.records);
   return { instance, restart, persist, seed, activity, schedules, replies, db, native, product, admit, idle, records, fibers };
 }
+
+test('generated native class inherits read-only cutover RPC with exact object identity', async () => {
+  const f = fixture();
+  const { sdkObservationFixture } = await import('../cutover/observation-test-fixtures');
+  const sdk = sdkObservationFixture();
+  for (const row of sdk.sql.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name LIKE 'cf_agent%'").all()) {
+    f.native.exec(String(row.sql));
+  }
+  f.native.exec("INSERT INTO cf_agents_state(id,state) VALUES('cf_schema_version','11')");
+  const before = f.native.prepare("SELECT total_changes() AS n").get()!.n;
+  const result = await f.instance.observeCutover({ namespaceId: 'local-only', objectId: 'object-id' });
+  assert.equal(result.generation, 'g2'); assert.equal(result.status, 'observed-idle');
+  assert.equal(f.native.prepare("SELECT total_changes() AS n").get()!.n, before);
+  await assert.rejects(f.instance.observeCutover({ namespaceId: 'local-only', objectId: 'wrong' }), /identity mismatch/);
+  assert.deepEqual(f.schedules(), []); sdk.sql.close();
+});
 
 test('generated native class inherits reply RPC and arms durable settlement wakes around its fiber', async () => {
   const f = fixture(); await f.seed();

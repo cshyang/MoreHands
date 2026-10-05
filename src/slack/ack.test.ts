@@ -83,4 +83,31 @@ test('postWorkingAck: swallows send failures, logs, and returns undefined (turn 
   assert.deepEqual(logs, ['[ack] working-ack failed to post: Slack down']);
 });
 
+// Losing raw-promise tracking would release the fence at the timeout or hide a late rejection.
+for (const rejects of [false, true]) {
+  test(`ack timeout retains producer until raw post ${rejects ? 'rejects' : 'settles'}`, async () => {
+    const { sqliteD1, readMigration, deferred } = await import('../cutover/test-fixtures');
+    const { beginIntake, setAdmissionState } = await import('../cutover/admissions');
+    const { createProducerScope } = await import('../cutover/producer');
+    const f = sqliteD1();
+    f.sql.exec(readMigration('0032_cutover_control.sql'));
+    await setAdmissionState(f.db, 0, 'open');
+    const env = { DB: f.db, CUTOVER_CONTROL: 'd1' };
+    const scope = createProducerScope(env, await beginIntake(env, 'g2', 'slack'));
+    const post = deferred<string>();
+    assert.equal(await postWorkingAck({ token: 'test', channel: 'C', threadTs: '1' }, {
+      postMessage: () => post.promise, timeoutMs: 1, log() {},
+      trackPost: promise => { scope.track(promise); },
+    }), undefined);
+    const finishing = scope.finish(true);
+    await Promise.resolve();
+    assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM cutover_producers').get()!.n, 1);
+    if (rejects) post.reject(new Error('late network failure'));
+    else post.resolve('2');
+    await finishing;
+    assert.equal(f.sql.prepare('SELECT COUNT(*) AS n FROM cutover_producers').get()!.n, rejects ? 1 : 0);
+    f.sql.close();
+  });
+}
+
 await run();

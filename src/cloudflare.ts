@@ -5,7 +5,11 @@
 import { DurableObject } from 'cloudflare:workers';
 import type { D1Like } from './skills/repository';
 import { takeDueReminders } from './gateway/reminders-store';
+import { handleScheduledJob } from './gateway/scheduled-dispatch';
+import { beginIntake } from './cutover/admissions';
+import { createProducerScope } from './cutover/producer';
 import app from './app';
+import { withIngressBudget, remainingIngressBudget } from './slack/ingress-budget';
 
 export { Sandbox } from '@cloudflare/sandbox';
 
@@ -47,31 +51,45 @@ async function callInternal(env: ScheduledEnv, ctx: ExecutionCtx, path: string, 
   console.log(`[cron] ${path} -> HTTP ${res.status}: ${text}`);
 }
 
-async function scanReminders(env: ScheduledEnv, ctx: ExecutionCtx): Promise<void> {
-  if (!env.DB) return;
-  const due = await takeDueReminders(env.DB);
-  for (const job of due) {
-    // Same body shape the SchedulerDO used to POST; the route's KV fireId claim and
-    // active-binding gate are unchanged.
-    await callInternal(env, ctx, '/__internal/scheduled', job);
-  }
+async function scanReminders(env: ScheduledEnv): Promise<void> {
+  const scope = createProducerScope(env, await beginIntake(env, 'g2', 'reminder-scan'));
+  let succeeded = false;
+  try {
+    if (!env.DB) { succeeded = true; return; }
+    const due = await takeDueReminders(env.DB);
+    for (const job of due) {
+      // The scan already owns admission; a second HTTP gate could reject a consumed one-shot.
+      const result = await handleScheduledJob(env, job);
+      if (result.status >= 400) throw new Error('scheduled dispatch incomplete');
+    }
+    succeeded = true;
+  } finally { await scope.finish(succeeded); }
 }
 
 export default {
-  async scheduled(controller: { cron?: string }, env: ScheduledEnv, ctx: ExecutionCtx): Promise<void> {
+  async scheduled(controller: { cron?: string; scheduledTime?: number }, env: ScheduledEnv, ctx: ExecutionCtx): Promise<void> {
     if (!env.HEARTBEAT_TOKEN) return;
     let job: Promise<void>;
     switch (controller.cron) {
       case REMINDERS_CRON:
-        job = scanReminders(env, ctx);
+        job = scanReminders(env);
         break;
       case RECONCILE_CRON:
-        job = Promise.all([
-          callInternal(env, ctx, '/__internal/agent-runs/reconcile', {}),
-          callInternal(env, ctx, '/__internal/replies/reconcile', {}),
-          // Layer 4 shares the 2-min tick; the review-sweep gate is one cheap SQL query.
-          callInternal(env, ctx, '/__internal/review-sweep', {}),
-        ]).then(() => undefined);
+        env = withIngressBudget(env);
+        job = (async () => {
+          const phases = [
+            { path: '/__internal/agent-runs/reconcile', minimum: 13 },
+            { path: '/__internal/replies/reconcile', minimum: 8 },
+            { path: '/__internal/review-sweep', minimum: 23 },
+            { path: '/__internal/slack-ingress/reconcile', minimum: 10 },
+          ];
+          const first = Math.floor((controller.scheduledTime ?? Date.now()) / 120_000) % phases.length;
+          for (let index = 0; index < phases.length; index++) {
+            const phase = phases[(first + index) % phases.length];
+            if (env.DB && remainingIngressBudget(env.DB) < phase.minimum) continue;
+            await callInternal(env, ctx, phase.path, {});
+          }
+        })();
         break;
       case REFLECT_CRON:
         job = callInternal(env, ctx, '/__internal/reflect-sweep', {});

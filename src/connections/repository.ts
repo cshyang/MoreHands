@@ -145,10 +145,14 @@ export async function loadConnections(db: D1Like, projectId: string): Promise<Co
  *  rows are the source of truth — they add/override by provider, and status='disabled' removes a
  *  seeded one. This is what lets an operator add a connection with no redeploy. A D1 hiccup falls
  *  back to the seed so a transient DB error can't strip a working connection. */
-export async function loadConnectionSpecs(db: D1Like | undefined, binding: Binding): Promise<ConnectionSpec[]> {
+export async function loadConnectionSpecs(db: D1Like | undefined, binding: Binding,
+  options?: { strictDb?: boolean }): Promise<ConnectionSpec[]> {
   const seed = binding.connections ?? [];
   if (!db) return seed;
-  const rows = await loadConnections(db, binding.projectId).catch(() => null);
+  const rows = await loadConnections(db, binding.projectId).catch(error => {
+    if (options?.strictDb) throw error;
+    return null;
+  });
   if (!rows) return seed; // DB hiccup → keep the seed rather than dropping connections
   const byProvider = new Map<string, ConnectionSpec>();
   for (const s of seed) byProvider.set(s.provider, s);

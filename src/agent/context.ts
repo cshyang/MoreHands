@@ -31,26 +31,32 @@ export function isEngagedProjectInput(attributes: Record<string, string> | undef
     : typeof input?.message === 'string' && input.kind !== 'heartbeat';
 }
 
-export async function loadProjectContext(env: Record<string, unknown>, id: string): Promise<ProjectContext> {
+export async function loadProjectContext(env: Record<string, unknown>, id: string,
+  options?: { persona: Persona | null; strictDb?: boolean }): Promise<ProjectContext> {
   const { projectId, slug } = parseAgentInstanceId(id);
   const db = env.DB as D1Like | undefined;
-  const binding = await bindingByProject(projectId, db);
+  const binding = await bindingByProject(projectId, db, options);
   if (!binding) return {
     projectId, slug, binding: null, persona: null, catalog: [], personality: null,
     memoryBlock: null, connections: { specs: [], enabledIntegrations: [] },
   };
 
-  let persona = db ? await loadPersona(db, projectId).catch(() => null) : null;
-  if (db && !persona) {
+  let persona = options ? options.persona : db ? await loadPersona(db, projectId).catch(() => null) : null;
+  if (!options && db && !persona) {
     const assigned = await assignSoul(db, projectId).catch(() => null);
     if (assigned) persona = await loadPersona(db, projectId).catch(() => null);
   }
-  const skills = db ? await loadSkillCatalog(db, projectId).catch(() => []) : [];
+  // Durable preparation must retry unavailable reads before freezing a partial snapshot.
+  const fallback = <T>(value: T) => (error: unknown): T => {
+    if (options?.strictDb) throw error;
+    return value;
+  };
+  const skills = db ? await loadSkillCatalog(db, projectId).catch(fallback([])) : [];
   const personality = db && skills.some((skill) => skill.name === 'personality')
-    ? await loadActiveSkillBody(db, projectId, 'personality').catch(() => null)
+    ? await loadActiveSkillBody(db, projectId, 'personality').catch(fallback(null))
     : null;
-  const memory = db ? await loadProjectMemory(db, projectId).catch(() => []) : [];
-  const connections = await loadConnectionSnapshot({ db, binding, env });
+  const memory = db ? await loadProjectMemory(db, projectId).catch(fallback([])) : [];
+  const connections = await loadConnectionSnapshot({ db, binding, env, strictDb: options?.strictDb });
   return {
     projectId,
     slug,

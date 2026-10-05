@@ -2,6 +2,8 @@ import { extend, type CloudflareAgentLike } from '@flue/runtime/cloudflare';
 import type { D1Like } from '../skills/repository';
 import { nativeReplyHistory, reconcileReplyHistory, type ReplySettlement } from './delivery';
 import { deliverPendingReplies, finalizeDeliveredReplies } from './reply-outbox';
+import { readNativeObservation } from '../cutover/native-observation';
+import type { ObservationIdentity, InstanceObservation } from '../cutover/observation';
 
 interface ReplyRuntimeEnv extends Record<string, unknown> {
   DB?: D1Like;
@@ -19,12 +21,19 @@ export const replyRuntime = extend<ReplyAgent, ReplyRuntimeEnv>({
   base: (Base) => class ReplyRuntimeAgent extends Base {
     private readonly replyStorage: DurableObjectStorage;
     private readonly replyEnv: ReplyRuntimeEnv;
+    private readonly replyObjectId: string;
     private replyPass: Promise<ReplySettlement[]> = Promise.resolve([]);
 
     constructor(ctx: DurableObjectState, env: ReplyRuntimeEnv) {
       super(ctx, env);
       this.replyStorage = ctx.storage;
       this.replyEnv = env;
+      this.replyObjectId = ctx.id.toString();
+    }
+
+    async observeCutover(identity: ObservationIdentity): Promise<InstanceObservation> {
+      if (identity.objectId !== this.replyObjectId) throw new Error('object identity mismatch');
+      return readNativeObservation(this.replyStorage, identity);
     }
 
     async onStart(props?: Record<string, unknown>): Promise<void> {

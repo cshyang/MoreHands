@@ -4,6 +4,7 @@ import type { D1Like } from '../skills/repository';
 import { postMessage as defaultPostMessage, type SlackPostOptions } from '../slack/post';
 import { agentRunNotificationBlocks, agentRunNotificationText } from '../slack/blocks';
 import { getAgentRunById, type AgentRun, type ClockAndIds } from './repository';
+import { reserveIngressBudget, reserveIngressBudgetShare } from '../slack/ingress-budget';
 
 const DELIVERY_LIMIT = 20;
 
@@ -76,43 +77,52 @@ export async function deliverPendingSlackRunNotifications(
   const now = deps.now?.() ?? Date.now();
   const summary: SlackNotificationSummary = { sent: 0, failed: 0, skipped: 0 };
 
-  for (const notification of await listPendingSlackNotifications(args.db, args.limit ?? DELIVERY_LIMIT)) {
-    const run = await getAgentRunById(args.db, notification.run_id);
-    if (!run) {
-      await markNotification(args.db, notification.id, { status: 'failed', error: 'agent run not found', sentAt: now });
-      summary.failed++;
-      continue;
-    }
+  const phase = reserveIngressBudgetShare(args.db, 1);
+  if (!phase) return summary;
+  try {
+    for (const notification of await listPendingSlackNotifications(phase.db, args.limit ?? DELIVERY_LIMIT)) {
+      const operation = reserveIngressBudget(phase.db, 5); // run/binding/persona + save + save-response-loss fallback
+      if (!operation) break;
+      const db = operation.db;
+      try {
+        const run = await getAgentRunById(db, notification.run_id);
+        if (!run) {
+          await markNotification(db, notification.id, { status: 'failed', error: 'agent run not found', sentAt: now });
+          summary.failed++;
+          continue;
+        }
 
-    const binding = await bindingByProject(notification.project_id, args.db).catch(() => undefined);
-    if (!binding || binding.status !== 'active') {
-      await markNotification(args.db, notification.id, { status: 'failed', error: 'no active Slack binding', sentAt: now });
-      summary.failed++;
-      continue;
-    }
+        const binding = await bindingByProject(notification.project_id, db).catch(() => undefined);
+        if (!binding || binding.status !== 'active') {
+          await markNotification(db, notification.id, { status: 'failed', error: 'no active Slack binding', sentAt: now });
+          summary.failed++;
+          continue;
+        }
 
-    const token = args.env[binding.transportTokenRef];
-    if (typeof token !== 'string' || !token) {
-      await markNotification(args.db, notification.id, { status: 'failed', error: `missing Slack token ${binding.transportTokenRef}`, sentAt: now });
-      summary.failed++;
-      continue;
-    }
+        const token = args.env[binding.transportTokenRef];
+        if (typeof token !== 'string' || !token) {
+          await markNotification(db, notification.id, { status: 'failed', error: `missing Slack token ${binding.transportTokenRef}`, sentAt: now });
+          summary.failed++;
+          continue;
+        }
 
-    try {
-      const text = agentRunNotificationText(notification.notification_type, run);
-      const blocks = agentRunNotificationBlocks(notification.notification_type, run);
-      const channel = run.slackChannelId ?? binding.externalSpaceId;
-      const persona = await loadPersona(args.db, notification.project_id).catch(() => null);
-      const ts = await postMessage(token, channel, text, threadFor(run), { blocks, ...personaIdentity(persona) });
-      await markNotification(args.db, notification.id, { status: 'sent', providerMessageId: ts ?? null, sentAt: now });
-      summary.sent++;
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Slack notification failed';
-      log(`[agent-runs] Slack notification ${notification.id} failed: ${message}`);
-      await markNotification(args.db, notification.id, { status: 'failed', error: message, sentAt: now });
-      summary.failed++;
+        try {
+          const text = agentRunNotificationText(notification.notification_type, run);
+          const blocks = agentRunNotificationBlocks(notification.notification_type, run);
+          const channel = run.slackChannelId ?? binding.externalSpaceId;
+          const persona = await loadPersona(db, notification.project_id).catch(() => null);
+          const ts = await postMessage(token, channel, text, threadFor(run), { blocks, ...personaIdentity(persona) });
+          await markNotification(db, notification.id, { status: 'sent', providerMessageId: ts ?? null, sentAt: now });
+          summary.sent++;
+        } catch (e) {
+          const message = e instanceof Error ? e.message : 'Slack notification failed';
+          log(`[agent-runs] Slack notification ${notification.id} failed: ${message}`);
+          await markNotification(db, notification.id, { status: 'failed', error: message, sentAt: now });
+          summary.failed++;
+        }
+      } finally { operation.release(); }
     }
-  }
+  } finally { phase.release(); }
 
   return summary;
 }

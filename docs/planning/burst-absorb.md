@@ -1,6 +1,10 @@
 # Burst-absorb: one coherent reply per message burst
 
-**Status**: approved, implementing.
+**Historical reference:** This document describes an earlier runtime or experiment. Current production uses Flue 2.2.2; see the [completed cutover](../operations/2026-10-05-flue-cutover.md) and [deployment runbook](../deployment.md). Earlier reset, replay and deployment proposals are not current operating instructions. Unimplemented follow-up ideas remain proposals.
+
+The former application burst-absorb mechanism was replaced by native Flue joining. The design below is retained for its historical rationale.
+
+**Historical status**: approved and implemented on the earlier runtime; superseded by native Flue joining.
 
 ## Problem
 

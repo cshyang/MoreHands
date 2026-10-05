@@ -28,6 +28,10 @@ Current status: early-stage and actively dogfooded. The repository is public so
 other agent builders and OSS maintainers can inspect the architecture, reuse the
 patterns, and help harden the maintainer workflows.
 
+The [Flue 2 production cutover](docs/operations/2026-10-05-flue-cutover.md) completed
+on 2026-10-05. Slack intake now commits to D1 before acknowledgement and recovers
+preparation and exact native admission after interruption.
+
 ## Maintainer workflows
 
 - Slack-native project assistant with per-channel memory and personas.
@@ -63,7 +67,7 @@ flowchart TB
     D["`**Execution** — muscle
     sandbox · code snippets · Trigger.dev pi runner`"]
     E["`**State** — what survives
-    D1 (truth) · KV (dedupe)`"]
+    D1 (product ledgers) · native Flue history`"]
     A --> B --> C --> D --> E
 ```
 
@@ -79,18 +83,23 @@ The generation suffix starts fresh native Flue state without deleting prior Dura
 sequenceDiagram
     participant S as Slack
     participant A as Hono app
+    participant I as D1 inbox
     participant D as agent DO (conv scope)
     S->>A: event (mention / thread message)
-    A->>A: verify signature, KV dedupe, resolve channel binding
-    A->>A: load fresh nonsecret context, seed delivery tracker
-    A->>D: native dispatch into conv:<id> instance
+    A->>A: verify signature and bound event
+    A->>I: atomically commit event and producer ownership
+    A-->>S: HTTP 200 after durable acceptance
+    A->>I: lease preparation, freeze route and acknowledgement intent
+    A->>I: store immutable native request in bounded chunks
+    A->>D: dispatch exact stored request with original key
+    A->>I: associate tracker and release producer
     D->>D: render prompt and native tools from snapshot
     D->>S: activity receipts while working
     D->>D: native join + durable completed answer steps
     D->>D: durable wake reads settled native answer steps
     D->>S: deliver staged final answer below working ack
     D->>D: deduplicated transcript and receipt completion
-    Note over A,D: Cron recovers missed wakeups and uncertain post outcomes
+    Note over I,D: Cron recovers preparation, native handoff and uncertain posts
 ```
 
 ### The cron clock
@@ -103,7 +112,7 @@ guards the external ticker used to hit, minus the second worker. Crons are UTC, 
 | Cron | Route | Purpose |
 |---|---|---|
 | `0 19 * * *` | `/__internal/reflect-sweep` | nightly REM at 03:00 KL — consolidate transcripts into memory |
-| `*/2 * * * *` | `/__internal/agent-runs/reconcile`, `/__internal/replies/reconcile`, `/__internal/review-sweep` | coding-run and Slack delivery recovery; budgeted review |
+| `*/2 * * * *` | `/__internal/slack-ingress/reconcile`, `/__internal/agent-runs/reconcile`, `/__internal/replies/reconcile`, `/__internal/review-sweep` | four budgeted recovery phases with rotating first access |
 | `* * * * *` | `/__internal/scheduled` (per due job) | agent-set reminders, stored in D1, claimed via CAS |
 
 ## Module map
@@ -115,8 +124,9 @@ guards the external ticker used to hit, minus the second worker. Crons are UTC, 
 | `src/agent/project.ts` | The agent definition: assembles skills, memory, connections, and tools per instance |
 | `src/agent` | System-prompt assembly and the agent's self-status tool |
 | `src/project` | Channel→project bindings, conversation reply targets, model resolution (D1: `bindings`, `conversation_targets`) |
-| `src/slack` | Slack event handling, activity receipts, blocks, slash commands, file auth |
-| `src/gateway` | Ingress utilities: token auth, cron parser (KL-aware), reminders store (D1: `reminders`) |
+| `src/slack` | Durable inbox and request chunks, activity receipts, answer outbox, blocks, slash commands, file auth |
+| `src/gateway` | Leased intake preparation and native handoff, token auth, cron parser (KL-aware), reminders store (D1: `reminders`) |
+| `src/cutover` | Admission fence, producer accounting, fleet/product diagnostics and evidence validation |
 | `src/knowledge` | Memory + reflection: durable project facts and the nightly REM consolidation (D1: `memories`, `messages`) |
 | `src/skills` | Agent-authored skills as SKILL.md docs with an active/archived lifecycle (D1: `skills`) |
 | `src/connections` | Provider connection broker over Nango: OAuth/PAT/App modes, per-provider tools (D1: `connections`) |
@@ -132,7 +142,7 @@ guards the external ticker used to hit, minus the second worker. Crons are UTC, 
 
 Bindings: D1 `hatchery-skills` (`DB`), KV `SLACK_EVENTS`, DO `SANDBOX` (container), and a
 Dynamic Worker loader. Flue generates the agent DO binding `FLUE_PROJECT_AGENT` itself.
-Flue 2 owns conversation history, execution retries, joined deliveries, and stream persistence.
+Flue 2.2.2 owns conversation history, execution retries, joined deliveries, and stream persistence.
 The Slack reply outbox tracks external delivery only; it does not replace Flue's history.
 One pinned internal adapter reads canonical assistant-step records because folded public history loses
 the distinction between tool narration and final answers. It also reads durable admission metadata
@@ -149,10 +159,15 @@ including the [Flue 0.11 upgrade](docs/planning/flue-011-upgrade.md)).
 ## Day-to-day
 
 ```bash
-npm run deploy     # gated: tsc --noEmit && npm test && vite build && wrangler deploy
 npm test           # full suite (tsx)
 npm run typecheck  # tsc --noEmit
+npm run dev        # local Worker
 ```
+
+Pushing `main` runs the guarded production workflow: typecheck, tests, remote migration
+check, fenced build and configuration validation, then deployment preserving live vars
+and skipping container rollout. See [deployment.md](docs/deployment.md#flue-2-cutover)
+for the manual equivalent and fence operations.
 
 After adding a migration, `wrangler d1 migrations apply hatchery-skills --remote` (also run by
 `./scripts/setup.sh migrate`). The migration history is tracked in the `d1_migrations` table.
@@ -162,4 +177,4 @@ After adding a migration, `wrangler d1 migrations apply hatchery-skills --remote
 Put a throwaway `ZAI_API_KEY` (and any secrets you want to exercise) in `.dev.vars`, then
 `npm run dev`. Use `zai/glm-5.3-flash` for migration canaries. Local model and fake-Slack tests do
 not prove production delivery or Cloudflare rollout safety; deploy separately after reviewing
-[the cutover checklist](docs/deployment.md#flue-2-cutover).
+[the deployment procedure](docs/deployment.md#flue-2-cutover).

@@ -4,7 +4,9 @@ import { readFileSync } from 'node:fs';
 import { createTestRunner } from '../shared/test-utils';
 import type { D1Like } from '../skills/repository';
 import type { ConversationRecord } from '@flue/runtime/adapter';
-import { seedReplyTracker, attachReplySubmission, reconcileReplyHistory, type ReplyHistory } from './delivery';
+import { seedReplyTracker, attachReplySubmission, reconcileReplyHistory, nativeReplyHistory, type ReplyHistory } from './delivery';
+import { projectDispatchMessage } from '../gateway/dispatch-message';
+import { loadProjectContext } from '../agent/context';
 
 const { test, run } = createTestRunner();
 const target = { projectId: 'P', agentSlug: 'default', conversationId: 'C', provider: 'slack' as const,
@@ -236,4 +238,107 @@ for (const mode of ['failed', 'empty', 'silent'] as const) {
     assert.equal(joined?.status, mode); assert.equal(f.replies().length, 0);
   });
 }
+test('vision user-message inputs drive the delivery cursor like dispatch signals', async () => {
+  const f = fixture(); await seed(f);
+  // Production attaches the submission at dispatch time via the receipt; a user_message
+  // input record carries no dispatch-signal attributes, so association is by submissionId.
+  await attachReplySubmission(f.db, { instanceId: 'instance', eventId: 'event', submissionId: 'host', now: 2 });
+  // A kind:'user' dispatch produces a user_message input record with a submission stamp
+  // and no dispatch-signal id/attributes — association must fall back to submissionId.
+  const userMessage = record('user_message', { messageId: 'm1', submissionId: 'host', parentId: null,
+    content: [{ type: 'text', text: 'question' }, { type: 'attachment', attachment: { id: 'att_x', mimeType: 'image/png' } }] });
+  const historyFeed = history([userMessage, ...step('s1', 'the answer'), settle()]);
+  const settlements = await reconcileReplyHistory(f.db, 'instance', historyFeed);
+  const tracker = await f.db.prepare(`SELECT status FROM slack_reply_trackers WHERE event_id='event'`).bind().first<{ status: string }>();
+  assert.equal(tracker!.status, 'staged');
+  const outbox = await f.db.prepare(`SELECT COUNT(*) AS n FROM slack_reply_outbox WHERE instance_id='instance'`).bind().first<{ n: number }>();
+  assert.equal(outbox!.n, 1);
+  assert.equal(settlements.length, 1);
+});
+
+async function nativeAdmissionFixture(message: unknown, overrides: Record<string, unknown> = {}, unready = false) {
+  const f = fixture();
+  const instanceId = 'project:demo:agent:default/conv:slack:TDEMO:CDEMO:1@g2';
+  const storage = {
+    sql: { exec: (query: string, ...bindings: unknown[]) => {
+      const statement = f.sql.prepare(query);
+      if (statement.columns().length) return { toArray: () => statement.all(...bindings as never[]) };
+      statement.run(...bindings as never[]); return { toArray: () => [] };
+    } },
+    transactionSync: <T>(fn: () => T): T => fn(),
+  };
+  const native = await nativeReplyHistory(storage as Parameters<typeof nativeReplyHistory>[0]);
+  f.sql.exec(`CREATE TABLE flue_agent_submissions(sequence INTEGER,submission_id TEXT,payload TEXT,status TEXT,
+    attempt_id TEXT,canonical_ready_at INTEGER,kind TEXT)`);
+  f.sql.prepare('INSERT INTO flue_agent_submissions VALUES(1,?,?,?,?,?,?)').run('host',
+    JSON.stringify({ agent: 'project', id: instanceId, submissionId: 'host', message, ...overrides }),
+    'settled', unready ? null : 'attempt', unready ? null : 1, 'dispatch');
+  return { ...f, native, instanceId };
+}
+async function admittedImage() {
+  const instanceId = 'project:demo:agent:default/conv:slack:TDEMO:CDEMO:1@g2';
+  const loaded = await loadProjectContext({}, instanceId);
+  const context = { ...loaded, binding: { ...loaded.binding!, externalAccountId: 'TDEMO', externalSpaceId: 'CDEMO' } };
+  return projectDispatchMessage(instanceId, { message: 'describe', conversationId: 'slack:TDEMO:CDEMO:1' }, context,
+    'event', [{ data: 'AQ==', mimeType: 'image/png' }]);
+}
+test('real native admission extractor heals an image receipt before canonical replay', async () => {
+  const f = await nativeAdmissionFixture(await admittedImage());
+  try {
+    await seedReplyTracker(f.db, { instanceId: f.instanceId, eventId: 'event', target, publish: true });
+    const feed = Object.assign(history([
+      record('user_message', { messageId: 'input', parentId: null, content: [{ type: 'text', text: 'image envelope' }] }),
+      ...step('answer', 'Recovered image answer'), settle(),
+    ]), { admissions: f.native.admissions });
+    await reconcileReplyHistory(f.db, f.instanceId, feed);
+    assert.equal(f.sql.prepare('SELECT submission_id FROM slack_reply_trackers').get()?.submission_id, 'host');
+    assert.equal(f.replies().length, 1); assert.equal(f.replies()[0].text, 'Recovered image answer');
+    await reconcileReplyHistory(f.db, f.instanceId, feed); assert.equal(f.replies().length, 1);
+  } finally { f.sql.close(); }
+});
+for (const quiet of [false, true]) test(`lost image receipt with joined ${quiet ? 'quiet' : 'text'} input preserves publication cursor`, async () => {
+  const f = await nativeAdmissionFixture(await admittedImage());
+  try {
+    await seedReplyTracker(f.db, { instanceId: f.instanceId, eventId: 'event', target, publish: true });
+    await seedReplyTracker(f.db, { instanceId: f.instanceId, eventId: 'joined-event', target, publish: !quiet });
+    const feed = Object.assign(history([
+      record('user_message', { messageId: 'image', parentId: null, content: [{ type: 'text', text: 'image' }] }),
+      ...step('public', 'Public image answer'), signal('joined-event', 'joined'),
+      ...step('joined-answer', quiet ? 'Private notes' : 'Joined text answer'), settle('joined'), settle(),
+    ]), { admissions: f.native.admissions });
+    await reconcileReplyHistory(f.db, f.instanceId, feed);
+    await reconcileReplyHistory(f.db, f.instanceId, feed);
+    assert.equal(f.replies().length, 1);
+    assert.equal(f.replies()[0].text, quiet ? 'Public image answer' : 'Public image answer\n\nJoined text answer');
+  } finally { f.sql.close(); }
+});
+test('unready image admission fails visibly without canonical answer', async () => {
+  const f = await nativeAdmissionFixture(await admittedImage(), {}, true);
+  try {
+    await seedReplyTracker(f.db, { instanceId: f.instanceId, eventId: 'event', target, publish: true });
+    await reconcileReplyHistory(f.db, f.instanceId, Object.assign(history([]), { admissions: f.native.admissions }));
+    assert.equal(f.sql.prepare('SELECT status FROM slack_reply_trackers').get()?.status, 'failed');
+    assert.equal(f.replies().length, 0);
+  } finally { f.sql.close(); }
+});
+for (const overrides of [{ agent: 'other' }, { id: 'other' }, { submissionId: 'other' }]) {
+  test(`native image rejects foreign admission ${JSON.stringify(overrides)}`, async () => {
+    const f = await nativeAdmissionFixture(await admittedImage(), overrides);
+    try { assert.deepEqual(await f.native.admissions!(f.instanceId), []); } finally { f.sql.close(); }
+  });
+}
+test('legacy image body event text cannot heal a receipt', async () => {
+  const f = await nativeAdmissionFixture({ kind: 'user', body: JSON.stringify({ eventId: 'event', message: 'legacy' }) });
+  try { assert.deepEqual(await f.native.admissions!(f.instanceId), []); } finally { f.sql.close(); }
+});
+test('image admission conflicting with receipt fails closed', async () => {
+  const f = await nativeAdmissionFixture(await admittedImage());
+  try {
+    await seedReplyTracker(f.db, { instanceId: f.instanceId, eventId: 'event', target, publish: true });
+    await attachReplySubmission(f.db, { instanceId: f.instanceId, eventId: 'event', submissionId: 'other' });
+    await assert.rejects(reconcileReplyHistory(f.db, f.instanceId,
+      Object.assign(history([]), { admissions: f.native.admissions })), /conflicts with durable admission/);
+  } finally { f.sql.close(); }
+});
+
 await run();

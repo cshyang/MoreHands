@@ -50,9 +50,13 @@ export async function loadConnectionSnapshot(args: {
   binding: Binding;
   env: Record<string, unknown>;
   listIntegrationsImpl?: typeof listIntegrations;
+  strictDb?: boolean;
 }): Promise<ConnectionSnapshot> {
   const { db, binding, env } = args;
-  const specs = await loadConnectionSpecs(db, binding).catch(() => binding.connections ?? []);
+  const specs = await loadConnectionSpecs(db, binding, { strictDb: args.strictDb }).catch(error => {
+    if (args.strictDb) throw error;
+    return binding.connections ?? [];
+  });
   const secretKey = typeof env.NANGO_SECRET_KEY === 'string' ? env.NANGO_SECRET_KEY : '';
   const available = db && secretKey
     ? await enabledIntegrations(secretKey, args.listIntegrationsImpl ?? listIntegrations)

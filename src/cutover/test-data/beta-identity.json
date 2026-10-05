@@ -1,0 +1,48 @@
+{
+  "name": "hatchery",
+  "migrations": [
+    {
+      "tag": "flue-class-FlueRegistry",
+      "new_sqlite_classes": [
+        "FlueRegistry"
+      ]
+    },
+    {
+      "tag": "flue-class-Project",
+      "new_sqlite_classes": [
+        "Project"
+      ]
+    },
+    {
+      "tag": "sandbox-class",
+      "new_sqlite_classes": [
+        "Sandbox"
+      ]
+    },
+    {
+      "tag": "flue-011",
+      "deleted_classes": [
+        "Project"
+      ],
+      "new_sqlite_classes": [
+        "FlueProjectAgent"
+      ]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SANDBOX",
+        "class_name": "Sandbox"
+      },
+      {
+        "name": "FLUE_PROJECT_AGENT",
+        "class_name": "FlueProjectAgent"
+      },
+      {
+        "name": "FLUE_REGISTRY",
+        "class_name": "FlueRegistry"
+      }
+    ]
+  }
+}

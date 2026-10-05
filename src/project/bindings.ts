@@ -26,6 +26,18 @@ export function hasCataloguedModel(model: string): boolean {
   return provider?.getModels().some((candidate) => candidate.id === model.slice(slash + 1) && candidate.contextWindow > 0) ?? false;
 }
 
+/** Whether the bound model accepts image input per the bundled provider catalog.
+ *  Gates the vision-native dispatch path: capable models receive real image
+ *  content; text-only models keep the metadata-only path (sandbox file tools). */
+export function modelSupportsVision(model?: string): boolean {
+  const chosen = model ?? DEFAULT_MODEL;
+  const slash = chosen.indexOf('/');
+  if (slash < 1) return false;
+  const provider = modelProviders.find((candidate) => candidate.id === chosen.slice(0, slash));
+  return provider?.getModels().some((candidate) => candidate.id === chosen.slice(slash + 1)
+    && Array.isArray(candidate.input) && candidate.input.includes('image')) ?? false;
+}
+
 // Warn at most once per model id per process — visibility in `wrangler tail` without per-turn spam
 // (the initializer resolves the model on every dispatch). Module-level; resets on a cold start.
 const warnedUnvalidatedModels = new Set<string>();
@@ -188,11 +200,15 @@ export async function bindingBySlack(accountId: string, spaceId: string, db?: D1
 }
 
 /** Resolve a project's binding by projectId. Seed first, then live D1. Only active bindings match. */
-export async function bindingByProject(projectId: string, db?: D1Like): Promise<Binding | undefined> {
+export async function bindingByProject(projectId: string, db?: D1Like,
+  options?: { strictDb?: boolean }): Promise<Binding | undefined> {
   const seed = bindings.find((b) => b.projectId === projectId && b.status === 'active');
   if (seed) return seed;
   if (!db) return undefined;
-  const rows = await loadBindings(db, projectId).catch(() => [] as BindingRecord[]);
+  const rows = await loadBindings(db, projectId).catch(error => {
+    if (options?.strictDb) throw error;
+    return [] as BindingRecord[];
+  });
   const rec = rows.find((r) => r.status === 'active');
   return rec ? bindingRecordToBinding(rec) : undefined;
 }

@@ -2,6 +2,8 @@ import type { D1Like } from '../skills/repository';
 import type { ConversationTarget } from '../project/conversations';
 import type { Persona } from '../project/persona';
 import type { ConversationRecord } from '@flue/runtime/adapter';
+import type { DeliveredMessage } from '@flue/runtime';
+import { projectEventId } from '../agent/delivery';
 import type { SqliteConversationStreamStore } from '@flue/runtime/internal';
 import { stageReply } from './reply-outbox';
 
@@ -74,11 +76,12 @@ export async function nativeReplyHistory(storage: {
       return rows.flatMap((row) => {
         const input = JSON.parse(String(row.payload)) as {
           agent?: string; id?: string; submissionId?: string;
-          message?: { kind?: string; attributes?: Record<string, string> };
+          message?: DeliveredMessage;
         };
-        const eventId = input.message?.attributes?.eventId;
         if (input.agent !== 'project' || input.id !== instanceId || input.submissionId !== row.submission_id
-          || input.message?.kind !== 'signal' || typeof eventId !== 'string') return [];
+          || !input.message) return [];
+        const eventId = projectEventId(instanceId, input.message);
+        if (!eventId) return [];
         return [{ eventId, submissionId: String(row.submission_id),
           unreadyTerminal: row.status === 'settled' && row.attempt_id == null && row.canonical_ready_at == null }];
       });
@@ -143,8 +146,12 @@ export async function reconcileReplyHistory(db: D1Like, instanceId: string, hist
     if (record.conversationId !== root) continue;
     // Only real admitted inputs move the delivery cursor; framework/hook signals carry
     // the host submission stamp too, but must not restore an older publish mode.
-    if (record.type === 'signal' && record.submissionId && record.id === `record_dispatch_input_${record.submissionId}`) {
-      const tracker = record.attributes?.eventId ? byEvent.get(record.attributes.eventId) : bySubmission.get(record.submissionId);
+    // Vision turns dispatch as kind:'user', whose canonical input record is a stamped
+    // user_message — it drives the cursor the same way, matching by submissionId.
+    if ((record.type === 'signal' && record.id === `record_dispatch_input_${record.submissionId}`
+      || record.type === 'user_message') && record.submissionId) {
+      const tracker = record.type === 'signal' && record.attributes?.eventId
+        ? byEvent.get(record.attributes.eventId) : bySubmission.get(record.submissionId);
       if (tracker) {
         if (tracker.submission_id && tracker.submission_id !== record.submissionId) throw new Error('Reply tracker submission conflicts with durable input');
         if (!tracker.submission_id) {

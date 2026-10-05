@@ -1,5 +1,7 @@
 # Flue 0.9.1 Follow-Ups
 
+**Historical reference:** This document describes an earlier runtime or experiment. Current production uses Flue 2.2.2; see the [completed cutover](../operations/2026-10-05-flue-cutover.md) and [deployment runbook](../deployment.md). Earlier reset, replay and deployment proposals are not current operating instructions. Unimplemented follow-up ideas remain proposals.
+
 As of the npm `@flue/runtime@0.9.1` / `@flue/cli@0.9.1` release, MoreHands still needs its own
 `agent_runs` and `agent_run_events` ledger. Flue workflow run history applies to finite workflows,
 not dispatched persistent-agent turns.
